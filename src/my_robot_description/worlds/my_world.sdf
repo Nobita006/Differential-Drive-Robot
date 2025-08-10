@@ -16,7 +16,8 @@
         <visual name="visual">
           <geometry><plane><normal>0 0 1</normal><size>50 50</size></plane></geometry>
           <material>
-            <pbr><metal><albedo_map>materials/textures/grass.png</albedo_map></metal></pbr>
+            <!-- Replaced the broken texture with a simple green color -->
+            <diffuse>0.3 0.8 0.3 1.0</diffuse>
           </material>
         </visual>
         <collision name="collision">
@@ -32,7 +33,8 @@
         <visual name="visual">
           <geometry><plane><normal>0 0 1</normal><size>50 1</size></plane></geometry>
           <material>
-            <pbr><metal><albedo>0.3 0.3 0.3</albedo></metal></pbr>
+            <!-- Using a simple grey color for consistency -->
+            <diffuse>0.5 0.5 0.5 1.0</diffuse>
           </material>
         </visual>
         <collision name="collision">

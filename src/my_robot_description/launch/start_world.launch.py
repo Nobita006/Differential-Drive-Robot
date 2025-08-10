@@ -2,7 +2,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
 from launch.substitutions import Command, LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
@@ -12,18 +12,14 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     my_robot_description_pkg = get_package_share_directory("my_robot_description")
-
-    # Define the path to the world file
     world_file = os.path.join(my_robot_description_pkg, "worlds", "my_world.sdf")
 
-    # Set the path to the urdf.xacro file
     model_arg = DeclareLaunchArgument(name="model", default_value=os.path.join(
                                         my_robot_description_pkg, "urdf", "bumperbot.urdf.xacro"
                                         ),
                                       description="Absolute path to robot urdf file"
     )
     
-    # Process the xacro file to get the robot description
     robot_description = ParameterValue(Command([
             "xacro ",
             LaunchConfiguration("model")
@@ -31,7 +27,6 @@ def generate_launch_description():
         value_type=str
     )
 
-    # The robot_state_publisher node, with use_sim_time set to True
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -39,7 +34,6 @@ def generate_launch_description():
                      "use_sim_time": True}]
     )
 
-    # The standard Gazebo launch file, now loading our world file by its full path
     gazebo = IncludeLaunchDescription(
                 PythonLaunchDescriptionSource([os.path.join(
                     get_package_share_directory("ros_gz_sim"), "launch"), "/gz_sim.launch.py"]),
@@ -49,7 +43,6 @@ def generate_launch_description():
                 ]
              )
 
-    # The node to spawn the robot in Gazebo
     gz_spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
@@ -59,7 +52,6 @@ def generate_launch_description():
                    "-z", "0.1"],
     )
     
-    # The bridge for the simulation clock
     gz_ros2_bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
@@ -69,7 +61,20 @@ def generate_launch_description():
         output="screen"
     )
     
-    # Our custom follower node
+    # --- THIS IS THE NEW, ROBUST FIX ---
+    # A timer action that waits for 2 seconds before executing the unpause command
+    unpause_action = TimerAction(
+        period=2.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['ros2', 'service', 'call', '/world/default/control', 'gz.msgs.WorldControl', '{pause: false}'],
+                shell=True,
+                output='screen'
+            )
+        ]
+    )
+    # --- END OF FIX ---
+    
     follower_node = Node(
         package='robot_brain',
         executable='follower',
@@ -82,5 +87,6 @@ def generate_launch_description():
         gz_ros2_bridge,
         gazebo,
         gz_spawn_entity,
+        unpause_action,  # Add the unpause action to the launch description
         follower_node,
     ])
