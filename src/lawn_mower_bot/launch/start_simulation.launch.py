@@ -43,8 +43,7 @@ def generate_launch_description():
             '/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat',
             # Joint States (Gazebo -> ROS)
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
-            # TF (Gazebo -> ROS) - Optional but good for ground truth debugging
-            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V'
+            
         ],
         output='screen'
     )
@@ -114,7 +113,7 @@ def generate_launch_description():
         executable='controller_server',
         output='screen',
         parameters=[nav2_params_file, {'use_sim_time': True}],
-        remappings=[('cmd_vel', 'cmd_vel_nav')] 
+        # remappings=[('cmd_vel', 'cmd_vel_nav')] 
     )
 
     planner_server_node = Node(
