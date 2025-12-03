@@ -26,7 +26,7 @@ def generate_launch_description():
         launch_arguments={'gz_args': f'-r {world_file}'}.items(),
     )
 
-    # 2. ROS-Gazebo Bridge (THE MISSING LINK)
+    # 2. ROS-Gazebo Bridge
     bridge_node = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -41,9 +41,10 @@ def generate_launch_description():
             '/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU',
             # GPS (Gazebo -> ROS)
             '/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat',
-            # Joint States (Gazebo -> ROS)
+            # Joint States (Gazebo -> ROS) - CRITICAL FOR WHEELS
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
-            
+            # TF (Gazebo -> ROS) - Helper for ground truth
+            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
         ],
         output='screen'
     )
