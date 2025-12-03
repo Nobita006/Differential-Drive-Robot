@@ -8,6 +8,13 @@
     <xacro:property name="wheel_separation" value="0.2"/>
     <xacro:property name="wheel_width" value="0.04"/>
 
+    <link name="dummy_link"/>
+
+    <joint name="dummy_joint" type="fixed">
+        <parent link="dummy_link"/>
+        <child link="base_link"/>
+    </joint>
+
     <!-- Base Link -->
     <link name="base_link">
         <visual>
@@ -34,7 +41,7 @@
     <joint name="base_footprint_joint" type="fixed">
         <parent link="base_link"/>
         <child link="base_footprint"/>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <origin xyz="0 0 -${wheel_radius}" rpy="0 0 0"/>
     </joint>
 
     <!-- IMU Sensor Link (attached to base_link) -->
@@ -100,10 +107,15 @@
             <right_joint>right_wheel_joint</right_joint>
             <wheel_separation>${wheel_separation}</wheel_separation>
             <wheel_radius>${wheel_radius}</wheel_radius>
-            <topic>cmd_vel</topic>
-            <odom_topic>odom</odom_topic>
+            
+            <topic>/cmd_vel</topic>
+            <odom_topic>/odom</odom_topic>
+            
             <frame_id>odom</frame_id>
             <child_frame_id>base_footprint</child_frame_id>
+            <publish_odom>true</publish_odom>
+            <publish_odom_tf>false</publish_odom_tf> 
+            <publish_wheel_tf>true</publish_wheel_tf>
         </plugin>
 
         <!-- IMU Sensor -->

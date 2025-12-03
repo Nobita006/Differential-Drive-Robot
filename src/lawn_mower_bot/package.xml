@@ -3,11 +3,14 @@
 <package format="3">
   <name>lawn_mower_bot</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>A ROS 2 package for a lawn mower robot simulation.</description>
   <maintainer email="sayandas001s@gmail.com">sayan</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache 2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
