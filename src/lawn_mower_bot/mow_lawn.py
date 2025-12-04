@@ -8,29 +8,32 @@ from nav_msgs.msg import Path
 from rclpy.parameter import Parameter
 
 def get_quaternion_from_euler(roll, pitch, yaw):
+    """
+    Convert an Euler angle to a quaternion.
+    """
     qx = math.sin(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) - math.cos(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     qy = math.cos(roll/2) * math.sin(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.cos(pitch/2) * math.sin(yaw/2)
     qz = math.cos(roll/2) * math.cos(pitch/2) * math.sin(yaw/2) - math.sin(roll/2) * math.sin(pitch/2) * math.cos(yaw/2)
     qw = math.cos(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
-def generate_spiral_path(navigator):
+def generate_dense_spiral(navigator):
     path_msg = Path()
     path_msg.header.frame_id = 'map'
     path_msg.header.stamp.sec = 0
     path_msg.header.stamp.nanosec = 0
     
+    # SETTINGS MATCHING THE SUCCESSFUL 'L' TEST
     spacing = 1.0 
-    max_radius = 10.0 # Increased slightly to cover more lawn
-    resolution = 0.05 # FIX: Add a waypoint every 5cm (High Resolution)
+    max_radius = 8.0 
+    resolution = 0.05 # 5cm resolution (CRITICAL for smooth turns)
     
     x, y = 0.0, 0.0 
     dx, dy = spacing, 0.0 
     segment_length = spacing
     current_len = 0
-    points_taken = 0
     
-    # Add Start Point
+    # 1. Add Start Point
     start_pose = PoseStamped()
     start_pose.header = path_msg.header
     start_pose.pose.position.x = x
@@ -38,7 +41,8 @@ def generate_spiral_path(navigator):
     start_pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, 0.0)
     path_msg.poses.append(start_pose)
     
-    total_legs = int(max_radius * 4) # Estimate legs
+    # 2. Generate Spiral
+    total_legs = int(max_radius * 4) # Estimate number of turns
     
     for _ in range(total_legs):
         # Determine number of small steps for this segment
@@ -65,7 +69,7 @@ def generate_spiral_path(navigator):
             path_msg.poses.append(pose)
             
         # Spiral logic (Turn corner)
-        current_len += spacing # Not used for logic, just tracking
+        current_len += spacing 
         dx, dy = -dy, dx 
         if dy == 0:
             segment_length += spacing
@@ -80,16 +84,18 @@ def main():
     
     nav = BasicNavigator()
     
+    # Force Sim Time
     param = Parameter('use_sim_time', Parameter.Type.BOOL, True)
     nav.set_parameters([param])
     
     print("---------------------------------------------------")
-    print("Nav2 Active. Waiting 5 seconds...")
+    print("Mowing Operation: Full Spiral")
+    print("Strategy: High-Density Waypoints (5cm)")
+    print("Waiting 5 seconds...")
     time.sleep(5.0) 
     print("---------------------------------------------------")
     
-    print("Generating DENSE coverage path...")
-    coverage_path = generate_spiral_path(nav)
+    coverage_path = generate_dense_spiral(nav)
     
     print(f"Path generated with {len(coverage_path.poses)} waypoints.")
     print("Sending path to robot...")
