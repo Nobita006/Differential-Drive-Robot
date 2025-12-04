@@ -8,30 +8,29 @@ from nav_msgs.msg import Path
 from rclpy.parameter import Parameter
 
 def get_quaternion_from_euler(roll, pitch, yaw):
-    """
-    Convert an Euler angle to a quaternion.
-    """
     qx = math.sin(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) - math.cos(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     qy = math.cos(roll/2) * math.sin(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.cos(pitch/2) * math.sin(yaw/2)
     qz = math.cos(roll/2) * math.cos(pitch/2) * math.sin(yaw/2) - math.sin(roll/2) * math.sin(pitch/2) * math.cos(yaw/2)
     qw = math.cos(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     return Quaternion(x=qx, y=qy, z=qz, w=qw)
 
-def generate_dense_spiral(navigator):
+def generate_lawn_mower_path(navigator):
     path_msg = Path()
     path_msg.header.frame_id = 'map'
     path_msg.header.stamp.sec = 0
     path_msg.header.stamp.nanosec = 0
     
-    # SETTINGS MATCHING THE SUCCESSFUL 'L' TEST
-    spacing = 1.0 
-    max_radius = 8.0 
-    resolution = 0.05 # 5cm resolution (CRITICAL for smooth turns)
+    # SETTINGS FOR FULL COVERAGE
+    # We will mow a 5m x 5m patch
+    area_width = 5.0   # X direction
+    area_height = 5.0  # Y direction
+    lane_width = 0.5   # Distance between strips
+    resolution = 0.05  # High density waypoints
     
-    x, y = 0.0, 0.0 
-    dx, dy = spacing, 0.0 
-    segment_length = spacing
-    current_len = 0
+    x, y = 0.0, 0.0
+    direction = 1 # 1 for East, -1 for West
+    
+    num_lanes = int(area_height / lane_width)
     
     # 1. Add Start Point
     start_pose = PoseStamped()
@@ -41,42 +40,37 @@ def generate_dense_spiral(navigator):
     start_pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, 0.0)
     path_msg.poses.append(start_pose)
     
-    # 2. Generate Spiral
-    total_legs = int(max_radius * 4) # Estimate number of turns
-    
-    for _ in range(total_legs):
-        # Determine number of small steps for this segment
-        steps = int(segment_length / resolution)
+    for lane in range(num_lanes):
+        # --- LONG STRIP (Drive along X) ---
+        length_steps = int(area_width / resolution)
         
-        # Calculate the small increment per step
-        step_x = dx / steps if steps > 0 else 0
-        step_y = dy / steps if steps > 0 else 0
-        
-        # Interpolate points along the segment
-        for _ in range(steps):
-            x += step_x
-            y += step_y
-            
+        for _ in range(length_steps):
+            x += (resolution * direction)
             pose = PoseStamped()
             pose.header = path_msg.header
             pose.pose.position.x = x
             pose.pose.position.y = y
-            
-            # Calculate Yaw based on current direction
-            yaw = math.atan2(dy, dx)
+            # Face travel direction
+            yaw = 0.0 if direction == 1 else 3.14159
             pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, yaw)
-            
             path_msg.poses.append(pose)
             
-        # Spiral logic (Turn corner)
-        current_len += spacing 
-        dx, dy = -dy, dx 
-        if dy == 0:
-            segment_length += spacing
-
-        if abs(x) > max_radius or abs(y) > max_radius:
-            break
+        # --- U-TURN / SHIFT LANE (Drive along Y) ---
+        # Don't shift if it's the last lane
+        if lane < num_lanes - 1:
+            width_steps = int(lane_width / resolution)
+            for _ in range(width_steps):
+                y += resolution
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, 1.57) # Face North
+                path_msg.poses.append(pose)
             
+            # Flip direction for next pass
+            direction *= -1
+
     return path_msg
 
 def main():
@@ -84,18 +78,16 @@ def main():
     
     nav = BasicNavigator()
     
-    # Force Sim Time
     param = Parameter('use_sim_time', Parameter.Type.BOOL, True)
     nav.set_parameters([param])
     
     print("---------------------------------------------------")
-    print("Mowing Operation: Full Spiral")
-    print("Strategy: High-Density Waypoints (5cm)")
+    print("Mowing Operation: Lawn Mower Stripes (Boustrophedon)")
     print("Waiting 5 seconds...")
     time.sleep(5.0) 
     print("---------------------------------------------------")
     
-    coverage_path = generate_dense_spiral(nav)
+    coverage_path = generate_lawn_mower_path(nav)
     
     print(f"Path generated with {len(coverage_path.poses)} waypoints.")
     print("Sending path to robot...")
