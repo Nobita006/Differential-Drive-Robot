@@ -6,52 +6,61 @@ bt_navigator:
     odom_topic: /odom
     bt_xml_filename: "navigate_w_replanning_and_recovery.xml"
     default_bt_xml_filename: "pkg://nav2_bt_navigator/behavior_trees/navigate_w_replanning_and_recovery.xml"
-    # CRITICAL FIX: We removed the 'plugin_lib_names' list entirely.
-    # The node will now load the standard default plugins automatically.
 
 controller_server:
   ros__parameters:
     use_sim_time: True
     controller_frequency: 20.0
+    # RPP handles velocity limits internally, but we set safe defaults here
     min_x_velocity: 0.0
     min_y_velocity: 0.0
     min_theta_velocity: 0.0
     max_x_velocity: 0.26
     max_y_velocity: 0.0
     max_theta_velocity: 1.0
-    min_speed_xy: 0.0
-    max_speed_xy: 0.26
-    min_speed_theta: 0.0
+    
+    progress_checker_plugin: "progress_checker"
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.05  
+      movement_time_allowance: 20.0   
+
+    transform_tolerance: 1.0
+
+    # FIX: SWITCHED TO REGULATED PURE PURSUIT (RPP)
+    # This controller is much simpler and robust for differential drive robots.
     controller_plugins: ["FollowPath"]
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: True
-      min_vel_x: 0.0
-      min_vel_y: 0.0
-      max_vel_x: 0.26
-      max_vel_y: 0.0
-      max_vel_theta: 1.0
-      acc_lim_x: 1.0
-      acc_lim_y: 0.0
-      acc_lim_theta: 1.0
-      decel_lim_x: -1.0
-      decel_lim_y: 0.0
-      decel_lim_theta: -1.0
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
-      RotateToGoal.scale: 32.0
-      GoalDist.scale: 24.0
-      Oscillation.scale: 0.0
-      transform_tolerance: 0.2
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
-      prune_plan: True
-      prune_distance: 1.0
-      short_progress_recheck_duration: 10.0
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      
+      # DRIVING SPEEDS
+      desired_linear_vel: 0.26
+      min_approach_linear_velocity: 0.05
+      
+      # LOOKAHEAD (The "Carrot")
+      # It will look 0.6 meters ahead. If the path turns, it steers towards that point.
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+      
+      # ROTATION LOGIC (The "Anti-Oscillation" Fix)
+      # If the robot is more than 45 degrees (0.785 rad) off path, 
+      # it allows rotating in place BEFORE driving.
+      rotate_to_heading_min_angle: 0.785
+      
+      # SAFETY
+      use_collision_detection: false # Keeping safety off for now to guarantee movement
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      
+      # TUNING
+      transform_tolerance: 0.1
+      use_velocity_scaled_lookahead_dist: false
+      approach_velocity_scaling_dist: 0.6
+      
+      # DYNAMICS
+      max_linear_accel: 2.0
+      max_angular_accel: 3.2
 
 planner_server:
   ros__parameters:
@@ -82,7 +91,7 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_footprint
       use_sim_time: True
-      robot_radius: 0.25
+      robot_radius: 0.15 
       resolution: 0.1
       track_unknown_space: true
       plugins: ["static_layer", "inflation_layer"]
@@ -107,7 +116,8 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.05
-      robot_radius: 0.25
+      robot_radius: 0.15
+      track_unknown_space: false
       plugins: ["inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -132,19 +142,17 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    # FIX: Added "wait" to the list
     behavior_plugins: ["spin", "backup", "wait"]
     spin:
       plugin: "nav2_behaviors::Spin"
     backup:
       plugin: "nav2_behaviors::BackUp"
-    # FIX: Added configuration for "wait"
     wait:
       plugin: "nav2_behaviors::Wait"
     global_frame: odom
     robot_base_frame: base_footprint
     transform_tolerance: 0.3
-    simulate_ahead_time: 2.0
+    simulate_ahead_time: 1.0
     max_rotational_vel: 1.0
     min_rotational_vel: 0.4
     rotational_acc_lim: 3.2

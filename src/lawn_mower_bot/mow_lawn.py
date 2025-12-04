@@ -8,9 +8,6 @@ from nav_msgs.msg import Path
 from rclpy.parameter import Parameter
 
 def get_quaternion_from_euler(roll, pitch, yaw):
-    """
-    Convert an Euler angle to a quaternion.
-    """
     qx = math.sin(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) - math.cos(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     qy = math.cos(roll/2) * math.sin(pitch/2) * math.cos(yaw/2) + math.sin(roll/2) * math.cos(pitch/2) * math.sin(yaw/2)
     qz = math.cos(roll/2) * math.cos(pitch/2) * math.sin(yaw/2) - math.sin(roll/2) * math.sin(pitch/2) * math.cos(yaw/2)
@@ -20,43 +17,58 @@ def get_quaternion_from_euler(roll, pitch, yaw):
 def generate_spiral_path(navigator):
     path_msg = Path()
     path_msg.header.frame_id = 'map'
-    path_msg.header.stamp = navigator.get_clock().now().to_msg()
+    path_msg.header.stamp.sec = 0
+    path_msg.header.stamp.nanosec = 0
     
-    spacing = 0.5 
-    max_radius = 4.0 
+    spacing = 1.0 
+    max_radius = 10.0 # Increased slightly to cover more lawn
+    resolution = 0.05 # FIX: Add a waypoint every 5cm (High Resolution)
     
     x, y = 0.0, 0.0 
     dx, dy = spacing, 0.0 
     segment_length = spacing
     current_len = 0
+    points_taken = 0
     
-    total_points = int((max_radius * 2 / spacing) ** 2)
+    # Add Start Point
+    start_pose = PoseStamped()
+    start_pose.header = path_msg.header
+    start_pose.pose.position.x = x
+    start_pose.pose.position.y = y
+    start_pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, 0.0)
+    path_msg.poses.append(start_pose)
     
-    for _ in range(total_points):
-        # FIX: Move FIRST, then append. 
-        # This prevents the first point from being (0,0)
-        x += dx
-        y += dy
-        current_len += spacing
+    total_legs = int(max_radius * 4) # Estimate legs
+    
+    for _ in range(total_legs):
+        # Determine number of small steps for this segment
+        steps = int(segment_length / resolution)
         
-        pose = PoseStamped()
-        pose.header.frame_id = 'map'
-        pose.header.stamp = path_msg.header.stamp 
-        pose.pose.position.x = x
-        pose.pose.position.y = y
+        # Calculate the small increment per step
+        step_x = dx / steps if steps > 0 else 0
+        step_y = dy / steps if steps > 0 else 0
         
-        # Calculate Yaw
-        yaw = math.atan2(dy, dx)
-        pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, yaw)
-        
-        path_msg.poses.append(pose)
-        
-        # Spiral logic
-        if current_len >= segment_length:
-            current_len = 0
-            dx, dy = -dy, dx 
-            if dy == 0:
-                segment_length += spacing
+        # Interpolate points along the segment
+        for _ in range(steps):
+            x += step_x
+            y += step_y
+            
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            
+            # Calculate Yaw based on current direction
+            yaw = math.atan2(dy, dx)
+            pose.pose.orientation = get_quaternion_from_euler(0.0, 0.0, yaw)
+            
+            path_msg.poses.append(pose)
+            
+        # Spiral logic (Turn corner)
+        current_len += spacing # Not used for logic, just tracking
+        dx, dy = -dy, dx 
+        if dy == 0:
+            segment_length += spacing
 
         if abs(x) > max_radius or abs(y) > max_radius:
             break
@@ -68,25 +80,20 @@ def main():
     
     nav = BasicNavigator()
     
-    # Force Sim Time (Critical for Gazebo synchronization)
     param = Parameter('use_sim_time', Parameter.Type.BOOL, True)
     nav.set_parameters([param])
     
     print("---------------------------------------------------")
-    print("Nav2 Active. Waiting 5 seconds for systems to settle...")
+    print("Nav2 Active. Waiting 5 seconds...")
     time.sleep(5.0) 
     print("---------------------------------------------------")
     
-    # Reset costmaps (Optional, clears ghosts)
-    # nav.clearAllCostmaps() 
-    
-    print("Generating coverage path...")
+    print("Generating DENSE coverage path...")
     coverage_path = generate_spiral_path(nav)
     
     print(f"Path generated with {len(coverage_path.poses)} waypoints.")
     print("Sending path to robot...")
     
-    # Execute the path
     nav.followPath(coverage_path)
     
     i = 0
