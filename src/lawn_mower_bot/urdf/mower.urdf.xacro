@@ -137,7 +137,115 @@
         <mu2>1.0</mu2>
     </gazebo>
 
+    <link name="camera_link">
+        <visual>
+            <geometry>
+                <box size="0.05 0.1 0.05"/>
+            </geometry>
+            <material name="black">
+                <color rgba="0.1 0.1 0.1 1.0"/>
+            </material>
+        </visual>
+        <collision>
+            <geometry>
+                <box size="0.05 0.1 0.05"/>
+            </geometry>
+        </collision>
+        <inertial>
+            <mass value="0.1"/>
+            <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+        </inertial>
+    </link>
+
+    <!-- Mount camera at front and top of chassis block -->
+    <joint name="camera_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="camera_link"/>
+        <origin xyz="0.18 0 0.12" rpy="0 0.1 0"/> <!-- pitched slightly down -->
+    </joint>
+
+    <gazebo reference="camera_link">
+        <sensor type="camera" name="front_camera">
+            <update_rate>30.0</update_rate>
+            <always_on>true</always_on>
+            <visualize>true</visualize>
+            <topic>/camera/image_raw</topic>
+            <camera>
+                <horizontal_fov>1.047198</horizontal_fov> <!-- 60 degrees -->
+                <image>
+                    <width>640</width>
+                    <height>480</height>
+                    <format>R8G8B8</format>
+                </image>
+                <clip>
+                    <near>0.1</near>
+                    <far>20.0</far>
+                </clip>
+            </camera>
+        </sensor>
+    </gazebo>
+
+    <!-- LIDAR SENSOR -->
+    <link name="lidar_link">
+        <visual>
+            <geometry>
+                <cylinder radius="0.04" length="0.05"/>
+            </geometry>
+            <material name="blue">
+                <color rgba="0.0 0.0 0.8 1.0"/>
+            </material>
+        </visual>
+        <collision>
+            <geometry>
+                <cylinder radius="0.04" length="0.05"/>
+            </geometry>
+        </collision>
+        <inertial>
+            <mass value="0.2"/>
+            <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+        </inertial>
+    </link>
+
+    <joint name="lidar_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="lidar_link"/>
+        <origin xyz="0 0 0.20" rpy="0 0 0"/> 
+    </joint>
+
+    <gazebo reference="lidar_link">
+        <sensor name='gpu_lidar' type='gpu_lidar'>
+            <gz_frame_id>lidar_link</gz_frame_id>
+            <topic>scan</topic>
+            <update_rate>10</update_rate>
+            <ray>
+                <scan>
+                    <horizontal>
+                        <samples>640</samples>
+                        <resolution>1</resolution>
+                        <min_angle>-3.14159</min_angle>
+                        <max_angle>3.14159</max_angle>
+                    </horizontal>
+                </scan>
+                <range>
+                    <min>0.15</min>
+                    <max>12.0</max>
+                    <resolution>0.01</resolution>
+                </range>
+                <noise>
+                    <type>gaussian</type>
+                    <mean>0.0</mean>
+                    <stddev>0.01</stddev>
+                </noise>
+            </ray>
+            <always_on>1</always_on>
+            <visualize>false</visualize>
+        </sensor>
+    </gazebo>
+
     <gazebo>
+        <plugin name="gz::sim::systems::Sensors" filename="gz-sim-sensors-system">
+             <render_engine>ogre2</render_engine>
+        </plugin>
         <plugin name="gz::sim::systems::DiffDrive" filename="gz-sim-diff-drive-system">
             <left_joint>left_wheel_joint</left_joint>
             <right_joint>right_wheel_joint</right_joint>

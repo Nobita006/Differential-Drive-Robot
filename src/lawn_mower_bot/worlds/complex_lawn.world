@@ -1,0 +1,369 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="complex_lawn">
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>0.0</latitude_deg>
+      <longitude_deg>0.0</longitude_deg>
+      <elevation>0.0</elevation>
+      <heading_deg>0.0</heading_deg>
+    </spherical_coordinates>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.85 0.85 0.8 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- ============================================================ -->
+    <!-- GROUND: L-shaped lawn                                        -->
+    <!-- Main rect: X[-10,10] Y[-10,5] = 20x15m                      -->
+    <!-- Extension: X[-10,2] Y[5,10]   = 12x5m                       -->
+    <!-- Total: L-shape, robot starts at (0,0)                        -->
+    <!-- ============================================================ -->
+
+    <!-- Main ground section -->
+    <model name="ground_main">
+      <static>true</static>
+      <pose>0 -2.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>20 15</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>20 15</size></plane></geometry>
+          <material>
+            <ambient>0.15 0.55 0.1 1</ambient>
+            <diffuse>0.2 0.65 0.15 1</diffuse>
+            <specular>0 0 0 0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Extension ground (upper-left arm of the L) -->
+    <model name="ground_extension">
+      <static>true</static>
+      <pose>-4 7.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>12 5</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>12 5</size></plane></geometry>
+          <material>
+            <ambient>0.15 0.55 0.1 1</ambient>
+            <diffuse>0.2 0.65 0.15 1</diffuse>
+            <specular>0 0 0 0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- BOUNDARY WALLS: L-shaped perimeter                           -->
+    <!-- ============================================================ -->
+
+    <!-- South wall: full width X[-10,10] at Y=-10 -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20.4 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>20.4 0.2 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- East wall: X=10, Y[-10,5] -->
+    <model name="wall_east_lower">
+      <static>true</static>
+      <pose>10 -2.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 15.4 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.2 15.4 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- North-east wall: Y=5, X[2,10] (inner corner of L) -->
+    <model name="wall_inner_north">
+      <static>true</static>
+      <pose>6 5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>8.2 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>8.2 0.2 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Inner east wall of extension: X=2, Y[5,10] -->
+    <model name="wall_inner_east">
+      <static>true</static>
+      <pose>2 7.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 5.4 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.2 5.4 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Top wall of extension: Y=10, X[-10,2] -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>-4 10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>12.4 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>12.4 0.2 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- West wall: X=-10, Y[-10,10] -->
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-10 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 20.4 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.2 20.4 1</size></box></geometry>
+          <material><ambient>0.45 0.25 0.1 1</ambient><diffuse>0.55 0.3 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- OBSTACLES: Trees                                             -->
+    <!-- ============================================================ -->
+
+    <!-- Large oak tree in main area -->
+    <model name="tree_oak">
+      <static>true</static>
+      <pose>4 -3 0 0 0 0</pose>
+      <link name="link">
+        <!-- Trunk -->
+        <collision name="trunk_col"><geometry><cylinder><radius>0.35</radius><length>2.0</length></cylinder></geometry>
+          <pose>0 0 1.0 0 0 0</pose>
+        </collision>
+        <visual name="trunk_vis"><geometry><cylinder><radius>0.35</radius><length>2.0</length></cylinder></geometry>
+          <pose>0 0 1.0 0 0 0</pose>
+          <material><ambient>0.4 0.2 0.05 1</ambient><diffuse>0.5 0.25 0.08 1</diffuse></material>
+        </visual>
+        <!-- Canopy -->
+        <visual name="canopy_vis"><geometry><sphere><radius>1.5</radius></sphere></geometry>
+          <pose>0 0 2.8 0 0 0</pose>
+          <material><ambient>0.1 0.5 0.1 1</ambient><diffuse>0.15 0.6 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Pine tree near boundary -->
+    <model name="tree_pine">
+      <static>true</static>
+      <pose>-6 -6 0 0 0 0</pose>
+      <link name="link">
+        <collision name="trunk_col"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry>
+          <pose>0 0 0.75 0 0 0</pose>
+        </collision>
+        <visual name="trunk_vis"><geometry><cylinder><radius>0.25</radius><length>1.5</length></cylinder></geometry>
+          <pose>0 0 0.75 0 0 0</pose>
+          <material><ambient>0.35 0.18 0.05 1</ambient><diffuse>0.45 0.22 0.07 1</diffuse></material>
+        </visual>
+        <visual name="canopy_vis"><geometry><cone><radius>1.2</radius><length>2.5</length></cone></geometry>
+          <pose>0 0 2.75 0 0 0</pose>
+          <material><ambient>0.05 0.4 0.08 1</ambient><diffuse>0.08 0.5 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Small tree in the L extension -->
+    <model name="tree_small">
+      <static>true</static>
+      <pose>-5 8 0 0 0 0</pose>
+      <link name="link">
+        <collision name="trunk_col"><geometry><cylinder><radius>0.2</radius><length>1.0</length></cylinder></geometry>
+          <pose>0 0 0.5 0 0 0</pose>
+        </collision>
+        <visual name="trunk_vis"><geometry><cylinder><radius>0.2</radius><length>1.0</length></cylinder></geometry>
+          <pose>0 0 0.5 0 0 0</pose>
+          <material><ambient>0.4 0.2 0.05 1</ambient><diffuse>0.5 0.25 0.08 1</diffuse></material>
+        </visual>
+        <visual name="canopy_vis"><geometry><sphere><radius>0.9</radius></sphere></geometry>
+          <pose>0 0 1.5 0 0 0</pose>
+          <material><ambient>0.12 0.55 0.12 1</ambient><diffuse>0.18 0.65 0.15 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- OBSTACLES: Rocks                                             -->
+    <!-- ============================================================ -->
+
+    <!-- Boulder cluster near east side -->
+    <model name="rock_large">
+      <static>true</static>
+      <pose>7 -7 0.3 0.1 0.05 0.3</pose>
+      <link name="link">
+        <collision name="col"><geometry><sphere><radius>0.5</radius></sphere></geometry></collision>
+        <visual name="vis"><geometry><sphere><radius>0.5</radius></sphere></geometry>
+          <material><ambient>0.4 0.4 0.38 1</ambient><diffuse>0.5 0.5 0.47 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="rock_small1">
+      <static>true</static>
+      <pose>7.8 -6.5 0.15 0 0 0.5</pose>
+      <link name="link">
+        <collision name="col"><geometry><sphere><radius>0.25</radius></sphere></geometry></collision>
+        <visual name="vis"><geometry><sphere><radius>0.25</radius></sphere></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.55 0.52 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="rock_small2">
+      <static>true</static>
+      <pose>6.5 -7.8 0.12 0.2 0 0.8</pose>
+      <link name="link">
+        <collision name="col"><geometry><sphere><radius>0.2</radius></sphere></geometry></collision>
+        <visual name="vis"><geometry><sphere><radius>0.2</radius></sphere></geometry>
+          <material><ambient>0.42 0.4 0.38 1</ambient><diffuse>0.52 0.5 0.48 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- OBSTACLES: Garden Bed (raised, rectangular, must go around)  -->
+    <!-- ============================================================ -->
+
+    <model name="garden_bed">
+      <static>true</static>
+      <pose>-3 1 0.15 0 0 0</pose>
+      <link name="link">
+        <!-- Raised bed frame -->
+        <collision name="col"><geometry><box><size>3.0 1.5 0.3</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>3.0 1.5 0.3</size></box></geometry>
+          <material><ambient>0.5 0.3 0.1 1</ambient><diffuse>0.6 0.35 0.12 1</diffuse></material>
+        </visual>
+        <!-- Soil/plants on top -->
+        <visual name="soil_vis"><geometry><box><size>2.8 1.3 0.05</size></box></geometry>
+          <pose>0 0 0.17 0 0 0</pose>
+          <material><ambient>0.3 0.15 0.05 1</ambient><diffuse>0.35 0.2 0.08 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- OBSTACLES: Bench                                             -->
+    <!-- ============================================================ -->
+
+    <model name="bench">
+      <static>true</static>
+      <pose>6 2 0 0 0 0.3</pose>
+      <link name="link">
+        <!-- Seat -->
+        <collision name="seat_col"><geometry><box><size>1.5 0.4 0.05</size></box></geometry>
+          <pose>0 0 0.45 0 0 0</pose>
+        </collision>
+        <visual name="seat_vis"><geometry><box><size>1.5 0.4 0.05</size></box></geometry>
+          <pose>0 0 0.45 0 0 0</pose>
+          <material><ambient>0.5 0.3 0.1 1</ambient><diffuse>0.6 0.35 0.12 1</diffuse></material>
+        </visual>
+        <!-- Left leg -->
+        <collision name="leg_l_col"><geometry><box><size>0.05 0.35 0.45</size></box></geometry>
+          <pose>-0.65 0 0.225 0 0 0</pose>
+        </collision>
+        <visual name="leg_l_vis"><geometry><box><size>0.05 0.35 0.45</size></box></geometry>
+          <pose>-0.65 0 0.225 0 0 0</pose>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.4 0.4 0.4 1</diffuse></material>
+        </visual>
+        <!-- Right leg -->
+        <collision name="leg_r_col"><geometry><box><size>0.05 0.35 0.45</size></box></geometry>
+          <pose>0.65 0 0.225 0 0 0</pose>
+        </collision>
+        <visual name="leg_r_vis"><geometry><box><size>0.05 0.35 0.45</size></box></geometry>
+          <pose>0.65 0 0.225 0 0 0</pose>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.4 0.4 0.4 1</diffuse></material>
+        </visual>
+        <!-- Backrest -->
+        <collision name="back_col"><geometry><box><size>1.5 0.05 0.4</size></box></geometry>
+          <pose>0 -0.17 0.67 0 0 0</pose>
+        </collision>
+        <visual name="back_vis"><geometry><box><size>1.5 0.05 0.4</size></box></geometry>
+          <pose>0 -0.17 0.67 0 0 0</pose>
+          <material><ambient>0.5 0.3 0.1 1</ambient><diffuse>0.6 0.35 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- OBSTACLES: Narrow passage (two pillars 1.2m apart)           -->
+    <!-- Tests tight maneuvering                                      -->
+    <!-- ============================================================ -->
+
+    <model name="pillar_left">
+      <static>true</static>
+      <pose>0 -5 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><cylinder><radius>0.2</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="vis"><geometry><cylinder><radius>0.2</radius><length>0.8</length></cylinder></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="pillar_right">
+      <static>true</static>
+      <pose>1.2 -5 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><cylinder><radius>0.2</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="vis"><geometry><cylinder><radius>0.2</radius><length>0.8</length></cylinder></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- DYNAMIC: Movable toy box (for course correction testing)     -->
+    <!-- ============================================================ -->
+
+    <model name="toy_box">
+      <pose>2 -2 0.15 0 0 0.4</pose>
+      <link name="link">
+        <inertial>
+          <mass>5.0</mass>
+          <inertia><ixx>0.04</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.04</iyy><iyz>0</iyz><izz>0.04</izz></inertia>
+        </inertial>
+        <collision name="col"><geometry><box><size>0.3 0.3 0.3</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.3 0.3 0.3</size></box></geometry>
+          <material><ambient>0.8 0.2 0.1 1</ambient><diffuse>0.9 0.25 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============================================================ -->
+    <!-- DYNAMIC: Garden gnome (small obstacle)                       -->
+    <!-- ============================================================ -->
+
+    <model name="garden_gnome">
+      <static>true</static>
+      <pose>-7 -3 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><cylinder><radius>0.12</radius><length>0.4</length></cylinder></geometry></collision>
+        <visual name="vis"><geometry><cylinder><radius>0.12</radius><length>0.4</length></cylinder></geometry>
+          <material><ambient>0.7 0.1 0.1 1</ambient><diffuse>0.8 0.15 0.12 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

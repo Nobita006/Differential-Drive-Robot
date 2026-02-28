@@ -1,0 +1,140 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="hard_lawn">
+    
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>0.0</latitude_deg>
+      <longitude_deg>0.0</longitude_deg>
+      <elevation>0.0</elevation>
+      <heading_deg>0.0</heading_deg>
+    </spherical_coordinates>
+    
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+    
+    <!-- Ground Plane (Grass) -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.1 0.6 0.1 1</ambient>
+            <diffuse>0.1 0.6 0.1 1</diffuse>
+            <specular>0 0 0 0</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Outer Boundary Fence -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>20 0.2 1</size></box></geometry>
+          <material><ambient>0.5 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -10 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>20 0.2 1</size></box></geometry>
+          <material><ambient>0.5 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>10 0 0.5 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>20 0.2 1</size></box></geometry>
+          <material><ambient>0.5 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-10 0 0.5 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>20 0.2 1</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>20 0.2 1</size></box></geometry>
+          <material><ambient>0.5 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Static Obstacles (Trees/Pillars) -->
+    <model name="tree1">
+      <static>true</static>
+      <pose>3 3 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><cylinder><radius>0.4</radius><length>1</length></cylinder></geometry></collision>
+        <visual name="vis"><geometry><cylinder><radius>0.4</radius><length>1</length></cylinder></geometry>
+          <material><ambient>0.4 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    <model name="tree2">
+      <static>true</static>
+      <pose>-4 2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><cylinder><radius>0.6</radius><length>1</length></cylinder></geometry></collision>
+        <visual name="vis"><geometry><cylinder><radius>0.6</radius><length>1</length></cylinder></geometry>
+          <material><ambient>0.4 0.2 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    <model name="shed">
+      <static>true</static>
+      <pose>6 -6 1 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>3 2 2</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>3 2 2</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Dynamic/Movable Obstacles for Course Correction -->
+    <model name="movable_box1">
+      <pose>-5 -5 0.25 0 0 0</pose>
+      <link name="link">
+        <inertial>
+          <mass>10.0</mass>
+          <inertia><ixx>0.16</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.16</iyy><iyz>0</iyz><izz>0.16</izz></inertia>
+        </inertial>
+        <collision name="col"><geometry><box><size>0.5 0.5 0.5</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material><ambient>0.8 0.1 0.1 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+    
+  </world>
+</sdf>

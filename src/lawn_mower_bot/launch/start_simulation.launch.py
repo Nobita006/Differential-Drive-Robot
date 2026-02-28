@@ -1,7 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import IncludeLaunchDescription, TimerAction, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 import xacro
@@ -9,14 +9,21 @@ import xacro
 def generate_launch_description():
     pkg_share = get_package_share_directory('lawn_mower_bot')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
-    
+
     # Paths
     urdf_file = os.path.join(pkg_share, 'urdf', 'mower.urdf.xacro')
     nav2_params_file = os.path.join(pkg_share, 'config', 'nav2_params.yaml')
     ekf_params_file = os.path.join(pkg_share, 'config', 'ekf.yaml')
-    world_file = os.path.join(pkg_share, 'worlds', 'lawn.world')
+    slam_params_file = os.path.join(pkg_share, 'config', 'slam_params.yaml')
+    world_file = os.path.join(pkg_share, 'worlds', 'complex_lawn.world')
     rviz_config_file = os.path.join(pkg_share, 'rviz', 'mower.rviz')
-    map_file = os.path.join(pkg_share, 'maps', 'lawn_map.yaml')
+    cyclonedds_config = os.path.join(pkg_share, 'config', 'cyclonedds.xml')
+
+    # ── FIX: Increase CycloneDDS max participants ──
+    # The default limit (~120) is too low for this many nodes.
+    set_cyclonedds = SetEnvironmentVariable(
+        'CYCLONEDDS_URI', f'file://{cyclonedds_config}'
+    )
 
     # 1. Gazebo Simulation
     gz_sim_launch = IncludeLaunchDescription(
@@ -39,12 +46,10 @@ def generate_launch_description():
             '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
             # IMU (Gazebo -> ROS)
             '/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU',
-            # GPS (Gazebo -> ROS)
-            '/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat',
-            # Joint States (Gazebo -> ROS) - CRITICAL FOR WHEELS
+            # Joint States (Gazebo -> ROS)
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
-            # TF (Gazebo -> ROS) - Helper for ground truth
-            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+            # LiDAR (Gazebo -> ROS)
+            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
         ],
         output='screen'
     )
@@ -52,7 +57,7 @@ def generate_launch_description():
     # 3. Robot State Publisher
     doc = xacro.process_file(urdf_file)
     robot_description = doc.toxml()
-    
+
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -68,7 +73,7 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 5. Robot Localization (Dual EKF)
+    # 5. Robot Localization (Local EKF only)
     ekf_local = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -78,43 +83,21 @@ def generate_launch_description():
         remappings=[('odometry/filtered', 'odometry/local')]
     )
 
-    ekf_global = Node(
-        package='robot_localization',
-        executable='ekf_node',
-        name='ekf_filter_node_map',
+    # 6. SLAM Toolbox (builds map in real-time from LiDAR)
+    slam_toolbox_node = Node(
+        package='slam_toolbox',
+        executable='async_slam_toolbox_node',
+        name='slam_toolbox',
         output='screen',
-        parameters=[ekf_params_file, {'use_sim_time': True}],
-        remappings=[('odometry/filtered', 'odometry/global')]
+        parameters=[slam_params_file, {'use_sim_time': True}, {'use_lifecycle_manager': True}],
     )
 
-    navsat_transform = Node(
-        package='robot_localization',
-        executable='navsat_transform_node',
-        name='navsat_transform_node',
-        output='screen',
-        parameters=[ekf_params_file, {'use_sim_time': True}],
-        remappings=[('imu', 'imu/data'),
-                    ('gps/fix', 'gps/fix'), 
-                    ('odometry/gps', '/odometry/gps'),
-                    ('odometry/filtered', 'odometry/global')]
-    )
-
-    # 6. NAVIGATION NODES
-    
-    map_server_node = Node(
-        package='nav2_map_server',
-        executable='map_server',
-        name='map_server',
-        output='screen',
-        parameters=[nav2_params_file, {'yaml_filename': map_file}, {'use_sim_time': True}]
-    )
-
+    # 7. Nav2 Stack
     controller_server_node = Node(
         package='nav2_controller',
         executable='controller_server',
         output='screen',
         parameters=[nav2_params_file, {'use_sim_time': True}],
-        # remappings=[('cmd_vel', 'cmd_vel_nav')] 
     )
 
     planner_server_node = Node(
@@ -140,7 +123,7 @@ def generate_launch_description():
         output='screen',
         parameters=[nav2_params_file, {'use_sim_time': True}]
     )
-    
+
     waypoint_follower_node = Node(
         package='nav2_waypoint_follower',
         executable='waypoint_follower',
@@ -149,8 +132,11 @@ def generate_launch_description():
         parameters=[nav2_params_file, {'use_sim_time': True}]
     )
 
-    lifecycle_nodes = ['map_server', 'controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower']
-    
+    # Nav2 + SLAM lifecycle nodes
+    # slam_toolbox MUST be first so it activates and starts publishing map→odom
+    # before Nav2 servers try to use it
+    lifecycle_nodes = ['slam_toolbox', 'controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower']
+
     lifecycle_manager_node = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -161,7 +147,7 @@ def generate_launch_description():
                     {'node_names': lifecycle_nodes}]
     )
 
-    # 7. RViz
+    # 8. RViz
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -170,20 +156,44 @@ def generate_launch_description():
         output='screen'
     )
 
+    # 9. Coverage Path Planner (BCD on SLAM costmap)
+    coverage_planner_node = Node(
+        package='lawn_mower_bot',
+        executable='coverage_planner.py',
+        name='coverage_planner',
+        output='screen',
+    )
+
+    # 10. Mow Executor (auto-starts mowing)
+    gemini_mow_executor_node = Node(
+        package='lawn_mower_bot',
+        executable='gemini_mow_executor.py',
+        name='gemini_mow_executor',
+        output='screen',
+    )
+
     return LaunchDescription([
+        # Set DDS config FIRST, before any nodes
+        set_cyclonedds,
+        # Core simulation
         gz_sim_launch,
-        bridge_node, # Added Bridge here
+        bridge_node,
         robot_state_publisher,
         spawn_entity,
+        # Localization & SLAM
         ekf_local,
-        ekf_global,
-        navsat_transform,
-        map_server_node,
-        controller_server_node,
-        planner_server_node,
-        behavior_server_node,
-        bt_navigator_node,
-        waypoint_follower_node,
-        TimerAction(period=3.0, actions=[lifecycle_manager_node]),
-        rviz_node
+        slam_toolbox_node,
+        # Nav2 (delayed to let Gazebo start first)
+        TimerAction(period=3.0, actions=[controller_server_node]),
+        TimerAction(period=3.0, actions=[planner_server_node]),
+        TimerAction(period=3.0, actions=[behavior_server_node]),
+        TimerAction(period=3.0, actions=[bt_navigator_node]),
+        TimerAction(period=3.0, actions=[waypoint_follower_node]),
+        TimerAction(period=10.0, actions=[lifecycle_manager_node]),
+        # Coverage planner (needs SLAM map, delayed)
+        TimerAction(period=15.0, actions=[coverage_planner_node]),
+        # Executor (needs Nav2 active, delayed)
+        TimerAction(period=20.0, actions=[gemini_mow_executor_node]),
+        # Visualization
+        rviz_node,
     ])
