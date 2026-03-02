@@ -1,4 +1,5 @@
 import os
+import subprocess
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription, TimerAction, SetEnvironmentVariable
@@ -7,6 +8,23 @@ from launch_ros.actions import Node
 import xacro
 
 def generate_launch_description():
+    # ── FIX: Kill leftover processes from previous sessions SYNCHRONOUSLY ──
+    # Must run before any launch actions are created. subprocess.run() blocks
+    # until complete, unlike ExecuteProcess which is non-blocking and would
+    # race with the new nodes being spawned.
+    print('[launch] Cleaning up previous session...')
+    subprocess.run(
+        'killall -9 async_slam_toolbox_node controller_server planner_server '
+        'behavior_server bt_navigator waypoint_follower lifecycle_manager '
+        'ekf_node parameter_bridge rviz2 2>/dev/null; '
+        'pkill -9 -f coverage_planner 2>/dev/null; '
+        'pkill -9 -f gemini_mow 2>/dev/null; '
+        'ros2 daemon stop 2>/dev/null; '
+        'rm -f ~/.ros/*.posegraph ~/.ros/*.data',
+        shell=True
+    )
+    print('[launch] Previous session cleaned. Starting fresh.')
+
     pkg_share = get_package_share_directory('lawn_mower_bot')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
@@ -25,6 +43,7 @@ def generate_launch_description():
         'CYCLONEDDS_URI', f'file://{cyclonedds_config}'
     )
 
+
     # 1. Gazebo Simulation
     gz_sim_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -38,7 +57,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            # Clock (Gazebo -> ROS)
+            # Clock (Gazebo -> ROS) — CRITICAL: all nodes use sim time
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
             # Cmd Vel (ROS -> Gazebo)
             '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
@@ -89,7 +108,7 @@ def generate_launch_description():
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
         output='screen',
-        parameters=[slam_params_file, {'use_sim_time': True}, {'use_lifecycle_manager': True}],
+        parameters=[slam_params_file, {'use_sim_time': True}],
     )
 
     # 7. Nav2 Stack
@@ -132,9 +151,8 @@ def generate_launch_description():
         parameters=[nav2_params_file, {'use_sim_time': True}]
     )
 
-    # Nav2 + SLAM lifecycle nodes
-    # slam_toolbox MUST be first so it activates and starts publishing map→odom
-    # before Nav2 servers try to use it
+    # Nav2 lifecycle nodes
+    # slam_toolbox in Jazzy is a lifecycle node and needs to be managed
     lifecycle_nodes = ['slam_toolbox', 'controller_server', 'planner_server', 'behavior_server', 'bt_navigator', 'waypoint_follower']
 
     lifecycle_manager_node = Node(
@@ -162,14 +180,15 @@ def generate_launch_description():
         executable='coverage_planner.py',
         name='coverage_planner',
         output='screen',
+        parameters=[{'use_sim_time': True}]
     )
 
     # 10. Mow Executor (auto-starts mowing)
     gemini_mow_executor_node = Node(
         package='lawn_mower_bot',
         executable='gemini_mow_executor.py',
-        name='gemini_mow_executor',
         output='screen',
+        parameters=[{'use_sim_time': True}]
     )
 
     return LaunchDescription([
@@ -189,11 +208,11 @@ def generate_launch_description():
         TimerAction(period=3.0, actions=[behavior_server_node]),
         TimerAction(period=3.0, actions=[bt_navigator_node]),
         TimerAction(period=3.0, actions=[waypoint_follower_node]),
-        TimerAction(period=10.0, actions=[lifecycle_manager_node]),
+        TimerAction(period=20.0, actions=[lifecycle_manager_node]),
         # Coverage planner (needs SLAM map, delayed)
-        TimerAction(period=15.0, actions=[coverage_planner_node]),
-        # Executor (needs Nav2 active, delayed)
-        TimerAction(period=20.0, actions=[gemini_mow_executor_node]),
+        TimerAction(period=25.0, actions=[coverage_planner_node]),
+        # Executor (delayed until Nav2 and Coverage planner are ready)
+        TimerAction(period=30.0, actions=[gemini_mow_executor_node]),
         # Visualization
         rviz_node,
     ])

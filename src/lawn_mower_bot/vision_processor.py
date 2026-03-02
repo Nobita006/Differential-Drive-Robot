@@ -24,6 +24,7 @@ class VisionProcessor(Node):
             10)
             
         self.pc_pub = self.create_publisher(PointCloud2, pc_topic, 10)
+        self.img_pub = self.create_publisher(Image, '/vision_debug_image', 10)
         self.bridge = CvBridge()
         self.get_logger().info("Vision Processor Node Started, publishing PointCloud2 to /vision_obstacles.")
 
@@ -78,6 +79,21 @@ class VisionProcessor(Node):
             # Publish PointCloud2
             pc_msg = self._create_point_cloud(points, msg.header.stamp)
             self.pc_pub.publish(pc_msg)
+            
+            # --- Draw Debug Image ---
+            # Highlight obstacles in red on the original image
+            cv_image[mask_obstacles > 0] = [0, 0, 255] # BGR Red
+            
+            # Draw horizon line (approx 50%)
+            horizon_y = int(self.height * 0.5)
+            cv2.line(cv_image, (0, horizon_y), (self.width, horizon_y), (255, 0, 0), 2)
+            cv2.putText(cv_image, "Ground Tracking Region", (10, horizon_y - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+            # Publish Debug Image
+            debug_msg = self.bridge.cv2_to_imgmsg(cv_image, "bgr8")
+            debug_msg.header = msg.header
+            self.img_pub.publish(debug_msg)
             
         except Exception as e:
             self.get_logger().error(f"Error processing image: {e}")

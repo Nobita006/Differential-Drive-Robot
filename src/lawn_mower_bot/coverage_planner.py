@@ -19,7 +19,9 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
+from geometry_msgs.msg import Point
 import numpy as np
+import scipy.ndimage as ndi
 import json
 import math
 
@@ -32,7 +34,7 @@ class CoveragePlanner(Node):
         self.declare_parameter('lane_width', 1.0)
         self.declare_parameter('robot_radius', 0.15)
         self.declare_parameter('safety_margin', 0.5)
-        self.declare_parameter('min_map_coverage', 0.3)  # min free cells before planning
+        self.declare_parameter('min_map_coverage', 0.05)  # min free cells before planning
 
         self.lane_width = self.get_parameter('lane_width').get_parameter_value().double_value
         self.robot_radius = self.get_parameter('robot_radius').get_parameter_value().double_value
@@ -44,6 +46,7 @@ class CoveragePlanner(Node):
         self.map_info = None
         self.exclusion_zones = []
         self.mowed_cells = set()  # (grid_x, grid_y) of mowed cells
+        self.failed_frontiers = []
         self.plan_ready = False
 
         # ---------- Subscribers ----------
@@ -55,9 +58,11 @@ class CoveragePlanner(Node):
         # ---------- Publishers ----------
         self.waypoints_pub = self.create_publisher(String, '/coverage/waypoints', 10)
         self.status_pub = self.create_publisher(String, '/coverage/status', 10)
+        self.area_pub = self.create_publisher(OccupancyGrid, '/mowed_area', 10)
 
         # ---------- Timer for status updates ----------
         self.create_timer(5.0, self._publish_status)
+        self.create_timer(2.0, self._publish_area_map)
 
         self.get_logger().info("CoveragePlanner ready — waiting for map from SLAM")
 
@@ -95,6 +100,15 @@ class CoveragePlanner(Node):
         """Re-plan coverage, optionally for missed waypoints only."""
         try:
             data = json.loads(msg.data)
+            command = data.get('command', '')
+            
+            if command == 'get_frontier':
+                failed_frontier = data.get('failed_frontier')
+                if failed_frontier:
+                    self.failed_frontiers.append(failed_frontier)
+                self._handle_frontier_request()
+                return
+                
             missed = data.get('missed_waypoints', [])
             if missed:
                 self.get_logger().info(
@@ -102,7 +116,6 @@ class CoveragePlanner(Node):
                 )
             else:
                 self.get_logger().info("Full re-plan requested")
-                self.mowed_cells.clear()
             self._generate_coverage()
         except Exception:
             # Simple text command
@@ -285,6 +298,138 @@ class CoveragePlanner(Node):
         return filtered
 
     # ------------------------------------------------------------------ #
+    # Frontier Exploration logic
+    # ------------------------------------------------------------------ #
+    def _handle_frontier_request(self):
+        """Find the largest frontier and publish as a single waypoint."""
+        if self.latest_map is None or self.map_info is None:
+            self.get_logger().warn("Map not available yet — can't search frontiers, telling executor to retry")
+            msg = String()
+            msg.data = json.dumps({
+                "waypoints": [],
+                "total_waypoints": 0,
+                "complete": False,
+                "source": "frontier_explorer"
+            })
+            self.waypoints_pub.publish(msg)
+            return
+
+        self.get_logger().info("Frontier request received. Searching map...")
+        frontier_wp = self._find_frontier()
+        
+        msg = String()
+        if frontier_wp:
+            self.get_logger().info(f"Frontier found at {frontier_wp['x']:.2f}, {frontier_wp['y']:.2f}")
+            msg.data = json.dumps({
+                "waypoints": [frontier_wp],
+                "total_waypoints": 1,
+                "complete": False,
+                "source": "frontier_explorer"
+            })
+        else:
+            self.get_logger().info("NO FRONTIERS FOUND. Map is complete!")
+            msg.data = json.dumps({
+                "waypoints": [],
+                "total_waypoints": 0,
+                "complete": True,
+                "source": "frontier_explorer"
+            })
+        self.waypoints_pub.publish(msg)
+        
+    def _find_frontier(self):
+        """Find the center of the largest frontier using image morphology."""
+        if self.latest_map is None:
+            return None
+            
+        # 0 is free, -1 is unknown, 100 is occupied
+        free_space = (self.latest_map == 0).astype(np.uint8)
+        unknown_space = (self.latest_map == -1).astype(np.uint8)
+        
+        # Dilate free space to find where it touches unknown space
+        kernel = np.ones((3,3), dtype=np.uint8)
+        dilated_free = ndi.binary_dilation(free_space, structure=kernel).astype(np.uint8)
+        
+        # Frontier is the intersection of dilated free space and unknown space
+        frontier_mask = (dilated_free & unknown_space)
+        
+        if not np.any(frontier_mask):
+            return None
+            
+        # Group frontier pixels into distinct contiguous regions
+        labeled_frontiers, num_features = ndi.label(frontier_mask)
+        
+        if num_features == 0:
+            return None
+            
+        # Find the largest frontier
+        sizes = ndi.sum(frontier_mask, labeled_frontiers, range(1, num_features + 1))
+        
+        # Filter out tiny frontiers (noise)
+        min_frontier_size = int(1.0 / self.map_info.resolution) # 1 meter long frontier
+        valid_frontiers = [i for i, size in enumerate(sizes) if size >= min_frontier_size]
+        
+        if not valid_frontiers:
+            return None
+            
+        # Sort valid frontiers by size descending
+        valid_frontiers.sort(key=lambda i: sizes[i], reverse=True)
+        
+        # Erode free space for safe navigation targets (done once for all frontiers)
+        safe_cells = int((self.robot_radius + 0.1) / self.map_info.resolution)
+        if safe_cells > 0:
+            safe_free_space = ndi.binary_erosion(free_space, iterations=safe_cells).astype(int)
+        else:
+            safe_free_space = free_space
+        
+        height, width = safe_free_space.shape
+        search_radius = safe_cells + 30  # ~1.5m search radius for safe pixels
+        
+        for idx in valid_frontiers:
+            label = idx + 1
+            cy, cx = ndi.center_of_mass(frontier_mask, labeled_frontiers, label)
+            wx, wy = self._grid_to_world(int(cx), int(cy))
+            
+            # Check against failed frontiers (within 1.0m)
+            is_failed = False
+            for failed_fp in self.failed_frontiers:
+                dist = math.hypot(wx - failed_fp['x'], wy - failed_fp['y'])
+                if dist < 1.0:
+                    is_failed = True
+                    break
+                    
+            if is_failed:
+                self.get_logger().info(f"Skipping frontier near {wx:.2f}, {wy:.2f} (previously failed)")
+                continue
+            
+            # Find the nearest safe free pixel to this frontier's center of mass
+            cxi, cyi = int(cx), int(cy)
+            best_x, best_y = cxi, cyi
+            min_dist = float('inf')
+            found_safe_pixel = False
+            
+            for y in range(max(0, cyi - search_radius), min(height, cyi + search_radius + 1)):
+                for x in range(max(0, cxi - search_radius), min(width, cxi + search_radius + 1)):
+                    if safe_free_space[y, x] == 1:
+                        dist = (x - cxi)**2 + (y - cyi)**2
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_x, best_y = x, y
+                            found_safe_pixel = True
+            
+            if not found_safe_pixel:
+                self.get_logger().info(f"Skipping frontier near {wx:.2f}, {wy:.2f} (no safe pixel nearby)")
+                continue
+            
+            # Found a valid frontier with a safe navigation target
+            wx, wy = self._grid_to_world(best_x, best_y)
+            yaw = math.atan2(cyi - best_y, cxi - best_x)
+            return {"x": wx, "y": wy, "yaw": yaw}
+        
+        # No valid frontiers with safe pixels found
+        self.get_logger().warn("All frontiers exhausted (failed or no safe pixel). Exploration may be complete.")
+        return None
+
+    # ------------------------------------------------------------------ #
     # Main planning logic
     # ------------------------------------------------------------------ #
     def _generate_coverage(self):
@@ -384,6 +529,30 @@ class CoveragePlanner(Node):
             "source": "coverage_planner_bcd",
         })
         self.waypoints_pub.publish(msg)
+
+    def _publish_area_map(self):
+        """Publish an OccupancyGrid showing only the mowed area."""
+        if self.latest_map is None or self.map_info is None:
+            return
+
+        height, width = self.latest_map.shape
+        grid = np.full((height, width), -1, dtype=np.int8) # Default unknown
+
+        # Mark free space as 0 (unmowed)
+        grid[self.latest_map == 0] = 0
+
+        # Mark mowed cells as 100 (mowed)
+        for gx, gy in self.mowed_cells:
+            if 0 <= gx < width and 0 <= gy < height:
+                grid[gy, gx] = 100
+
+        area_msg = OccupancyGrid()
+        area_msg.header.frame_id = 'map'
+        area_msg.header.stamp = self.get_clock().now().to_msg()
+        area_msg.info = self.map_info
+        area_msg.data = grid.flatten().tolist()
+        
+        self.area_pub.publish(area_msg)
 
 
 def main(args=None):

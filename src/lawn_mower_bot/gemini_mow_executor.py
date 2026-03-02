@@ -1,28 +1,20 @@
 #!/usr/bin/env python3
 """
-Gemini AI Mow Executor — Real-World Ready
+Gemini AI Mow Executor — Demo-Ready
 
-Executes mowing in three phases:
-  Phase 1: Boundary Discovery — drives a perimeter to let SLAM build the map
+Executes autonomous mowing in three phases:
+  Phase 1: Boundary Discovery — frontier exploration to let SLAM build the map
   Phase 2: Coverage Mowing — receives waypoints from coverage_planner, executes
-  Phase 3: Cleanup — re-plans for missed areas, fills gaps
+  Phase 3: Return to Dock — navigates back to the starting position
 
-Integrates with:
-  - coverage_planner (BCD waypoints from SLAM costmap)
-  - gemini_planner (real-time hazard detection)
-  - gemini_mow_planner (NLP command parsing)
-
-Subscribes:
-    /mow_command         (String)  — natural language mowing commands
-    /coverage/waypoints  (String)  — coverage waypoints from planner
-    /coverage/status     (String)  — coverage statistics
-    /gemini/hazards      (String)  — real-time hazard alerts
-    /gemini/mow_plan     (String)  — AI-parsed plan (forwarded to coverage planner)
-
-Publishes:
-    /mow_progress        (String)  — JSON progress updates
-    /coverage/mark_mowed (String)  — marks areas as mowed
-    /coverage/replan     (String)  — requests re-planning
+Features:
+  - Frontier exploration with retry logic
+  - Stuck detection & automatic recovery (backup/spin)
+  - Adaptive speed near obstacles
+  - Return-to-dock after mowing
+  - Rich RViz visualization (planned path, actual trail, deviation, mowed area)
+  - Coverage progress tracking
+  - Dynamic replanning during mowing
 """
 import rclpy
 import math
@@ -31,11 +23,17 @@ import json
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Quaternion
-from std_msgs.msg import String
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from std_msgs.msg import String, ColorRGBA
+from nav_msgs.msg import Path
+from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.parameter import Parameter
+from tf2_ros import Buffer, TransformListener
 
 
 def get_quaternion_from_euler(roll, pitch, yaw):
+    """Convert Euler angles to a geometry_msgs/Quaternion."""
     qx = math.sin(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) - \
          math.cos(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
     qy = math.cos(roll/2) * math.sin(pitch/2) * math.cos(yaw/2) + \
@@ -44,7 +42,12 @@ def get_quaternion_from_euler(roll, pitch, yaw):
          math.sin(roll/2) * math.sin(pitch/2) * math.cos(yaw/2)
     qw = math.cos(roll/2) * math.cos(pitch/2) * math.cos(yaw/2) + \
          math.sin(roll/2) * math.sin(pitch/2) * math.sin(yaw/2)
-    return Quaternion(x=qx, y=qy, z=qz, w=qw)
+    q = Quaternion()
+    q.x = float(qx)
+    q.y = float(qy)
+    q.z = float(qz)
+    q.w = float(qw)
+    return q
 
 
 def make_pose(x, y, yaw, nav, frame='map'):
@@ -64,41 +67,34 @@ STATE_BOUNDARY_DISCOVERY = "boundary_discovery"
 STATE_WAITING_FOR_PLAN = "waiting_for_plan"
 STATE_MOWING = "mowing"
 STATE_REPLANNING = "replanning"
+STATE_RETURNING = "returning"
 STATE_COMPLETE = "complete"
 STATE_STOPPED = "stopped"
 
 
 class GeminiMowExecutor(Node):
-    """Real-world mowing executor with boundary discovery and reactive re-planning."""
+    """Demo-ready mowing executor with visualization and all features."""
 
     def __init__(self, navigator: BasicNavigator):
         super().__init__('gemini_mow_executor')
         self.nav = navigator
 
         # ---------- Parameters ----------
-        self.declare_parameter('auto_start', True)
-        self.declare_parameter('boundary_radius', 5.0)
-        self.declare_parameter('boundary_steps', 20)
+        self.declare_parameter('auto_start', False)
         self.declare_parameter('batch_size', 6)
         self.declare_parameter('max_replan_attempts', 3)
         self.declare_parameter('mow_mark_radius', 0.5)
-        self.declare_parameter('plan_timeout', 30.0)
+        self.declare_parameter('plan_timeout', 60.0)
+        self.declare_parameter('stuck_timeout', 25.0)
+        self.declare_parameter('stuck_distance', 0.08)
 
-        self.auto_start = self.get_parameter(
-            'auto_start').get_parameter_value().bool_value
-
-        self.boundary_radius = self.get_parameter(
-            'boundary_radius').get_parameter_value().double_value
-        self.boundary_steps = self.get_parameter(
-            'boundary_steps').get_parameter_value().integer_value
-        self.batch_size = self.get_parameter(
-            'batch_size').get_parameter_value().integer_value
-        self.max_replan_attempts = self.get_parameter(
-            'max_replan_attempts').get_parameter_value().integer_value
-        self.mow_mark_radius = self.get_parameter(
-            'mow_mark_radius').get_parameter_value().double_value
-        self.plan_timeout = self.get_parameter(
-            'plan_timeout').get_parameter_value().double_value
+        self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
+        self.batch_size = self.get_parameter('batch_size').get_parameter_value().integer_value
+        self.max_replan_attempts = self.get_parameter('max_replan_attempts').get_parameter_value().integer_value
+        self.mow_mark_radius = self.get_parameter('mow_mark_radius').get_parameter_value().double_value
+        self.plan_timeout = self.get_parameter('plan_timeout').get_parameter_value().double_value
+        self.stuck_timeout = self.get_parameter('stuck_timeout').get_parameter_value().double_value
+        self.stuck_distance = self.get_parameter('stuck_distance').get_parameter_value().double_value
 
         # ---------- State ----------
         self.state = STATE_IDLE
@@ -107,24 +103,122 @@ class GeminiMowExecutor(Node):
         self.coverage_status = None
         self.missed_waypoints = []
         self.replan_count = 0
-        self.start_time = 0.0
-        self.total_completed = 0
         self.total_waypoints = 0
+        self.total_completed = 0
+        self.start_time = 0.0
+        self.dock_position = {'x': 0.0, 'y': 0.0, 'yaw': 0.0}
+        self.frontiers_explored = 0
+        self.current_pass = 1
+        self.last_position = None
+        self.last_move_time = 0.0
+        self.recovery_count = 0
+
+        self.cb_group = ReentrantCallbackGroup()
 
         # ---------- Subscribers ----------
-        self.create_subscription(String, '/mow_command', self._command_cb, 10)
-        self.create_subscription(String, '/coverage/waypoints', self._coverage_wp_cb, 10)
-        self.create_subscription(String, '/coverage/status', self._coverage_status_cb, 10)
-        self.create_subscription(String, '/gemini/hazards', self._hazard_cb, 10)
+        self.create_subscription(String, '/mow_command', self._command_cb, 10, callback_group=self.cb_group)
+        self.create_subscription(String, '/coverage/waypoints', self._coverage_wp_cb, 10, callback_group=self.cb_group)
+        self.create_subscription(String, '/coverage/status', self._coverage_status_cb, 10, callback_group=self.cb_group)
+        self.create_subscription(String, '/gemini/hazards', self._hazard_cb, 10, callback_group=self.cb_group)
 
         # ---------- Publishers ----------
+        self.replan_pub = self.create_publisher(String, '/coverage/replan', 10)
         self.progress_pub = self.create_publisher(String, '/mow_progress', 10)
         self.mark_mowed_pub = self.create_publisher(String, '/coverage/mark_mowed', 10)
-        self.replan_pub = self.create_publisher(String, '/coverage/replan', 10)
+
+        # Visualization publishers
+        self.trail_pub = self.create_publisher(Marker, '/viz/robot_trail', 10)
+        self.planned_path_pub = self.create_publisher(Marker, '/viz/planned_path', 10)
+        self.frontier_pub = self.create_publisher(MarkerArray, '/viz/frontiers', 10)
+        self.deviation_pub = self.create_publisher(Marker, '/viz/deviation', 10)
+        self.status_marker_pub = self.create_publisher(Marker, '/viz/status_text', 10)
+        self.waypoint_pub = self.create_publisher(MarkerArray, '/viz/waypoints', 10)
+
+        # ---------- TF & Path Tracking ----------
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # Trail data
+        self.trail_points = []  # [(x, y, state)]
+        self.deviation_points = []  # [(x, y)] when deviating
+
+        # Timers
+        self.create_timer(0.5, self._update_trail, callback_group=self.cb_group)
+        self.create_timer(1.0, self._publish_status_overlay, callback_group=self.cb_group)
 
         self.get_logger().info(
             "GeminiMowExecutor ready — send a command to /mow_command to begin"
         )
+
+    # ================================================================== #
+    # Robot Position Helper
+    # ================================================================== #
+    def _get_robot_position(self):
+        """Get current robot (x, y, yaw) from TF."""
+        try:
+            now = rclpy.time.Time()
+            trans = self.tf_buffer.lookup_transform('map', 'base_footprint', now)
+            x = trans.transform.translation.x
+            y = trans.transform.translation.y
+            q = trans.transform.rotation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            return (x, y, yaw)
+        except Exception:
+            return None
+
+    # ================================================================== #
+    # Stuck Detection & Recovery
+    # ================================================================== #
+    def _check_stuck_and_recover(self):
+        """Check if robot is stuck and trigger recovery if needed."""
+        pos = self._get_robot_position()
+        if pos is None:
+            return False
+
+        now = self.get_clock().now().nanoseconds / 1e9
+
+        if self.last_position is not None:
+            dx = pos[0] - self.last_position[0]
+            dy = pos[1] - self.last_position[1]
+            dist = math.hypot(dx, dy)
+
+            if dist > self.stuck_distance:
+                self.last_position = pos
+                self.last_move_time = now
+                return False
+
+            if (now - self.last_move_time) > self.stuck_timeout:
+                self.get_logger().warn(
+                    f"🚨 STUCK DETECTED! No movement for {self.stuck_timeout}s. "
+                    f"Triggering recovery (attempt #{self.recovery_count + 1})"
+                )
+                self.recovery_count += 1
+
+                # Cancel current task
+                self.nav.cancelTask()
+                time.sleep(0.5)
+
+                # Try backup
+                self.get_logger().info("Recovery: Backing up 0.3m...")
+                self.nav.backup(backup_dist=0.3, backup_speed=0.1, time_allowance=10)
+                while not self.nav.isTaskComplete():
+                    time.sleep(0.1)
+
+                # Try spin
+                self.get_logger().info("Recovery: Spinning 90°...")
+                self.nav.spin(spin_dist=1.57, time_allowance=10)
+                while not self.nav.isTaskComplete():
+                    time.sleep(0.1)
+
+                self.last_position = self._get_robot_position()
+                self.last_move_time = self.get_clock().now().nanoseconds / 1e9
+                return True
+        else:
+            self.last_position = pos
+            self.last_move_time = now
+
+        return False
 
     # ================================================================== #
     # Callbacks
@@ -145,58 +239,133 @@ class GeminiMowExecutor(Node):
                 self.state = STATE_STOPPED
                 self._publish_progress("stopped_by_user")
                 return
-            elif any(w in command for w in ['quick', 'fast', 'hurry', 'rain']):
-                self.get_logger().info("HURRY command — will skip alternate waypoints")
-                self.coverage_waypoints = self.coverage_waypoints[::2]
-                self.total_waypoints = self.total_completed + len(self.coverage_waypoints)
-                return
-            # Other mid-run commands: the mow_planner will parse and publish a new plan
             return
 
         # New mow command — start the full pipeline
         if self.state not in (STATE_IDLE, STATE_COMPLETE, STATE_STOPPED):
-            self.get_logger().warn(
-                f"Already in state '{self.state}' — ignoring new command"
-            )
+            self.get_logger().warn(f"Already in state '{self.state}' — ignoring")
             return
 
         self.state = STATE_IDLE
         self.replan_count = 0
         self.missed_waypoints = []
         self.total_completed = 0
-        self.start_time = time.time()
+        self.frontiers_explored = 0
+        self.current_pass = 1
+        self.recovery_count = 0
+        self.trail_points = []
+        self.deviation_points = []
+        self.start_time = self.get_clock().now().nanoseconds / 1e9
+
+        # Save dock position
+        pos = self._get_robot_position()
+        if pos:
+            self.dock_position = {'x': pos[0], 'y': pos[1], 'yaw': pos[2]}
 
         # Start Phase 1: Boundary Discovery
         self._run_boundary_discovery()
 
     def _coverage_wp_cb(self, msg):
-        """Receive coverage waypoints from the planner."""
+        """Receive coverage waypoints or frontier targets from the planner."""
         try:
             data = json.loads(msg.data)
+            source = data.get('source', '')
 
+            # --- PHASE 1: FRONTIER EXPLORATION LOOP ---
+            if source == 'frontier_explorer':
+                if data.get('complete', False):
+                    self.get_logger().info(
+                        f"✅ Boundary discovery COMPLETE after {self.frontiers_explored} frontiers."
+                    )
+                    time.sleep(3.0)  # Let SLAM finalize
+
+                    print("=" * 60)
+                    print(f"  PHASE 2: COVERAGE MOWING (Pass {self.current_pass})")
+                    print("  Requesting coverage plan from BCD planner...")
+                    print("=" * 60)
+
+                    self.state = STATE_WAITING_FOR_PLAN
+                    self._publish_progress("waiting_for_plan")
+
+                    replan_msg = String()
+                    replan_msg.data = json.dumps({"trigger": "boundary_discovery_complete"})
+                    self.replan_pub.publish(replan_msg)
+                    return
+
+                waypoints = data.get('waypoints', [])
+                if not waypoints:
+                    self.get_logger().info("No frontiers available yet, retrying in 3s...")
+                    time.sleep(3.0)
+                    replan_msg = String()
+                    replan_msg.data = json.dumps({"command": "get_frontier"})
+                    self.replan_pub.publish(replan_msg)
+                    return
+
+                fp = waypoints[0]
+                self.frontiers_explored += 1
+                self.get_logger().info(
+                    f"🔍 Frontier #{self.frontiers_explored}: ({fp['x']:.2f}, {fp['y']:.2f})"
+                )
+
+                # Visualize frontier target
+                self._publish_frontier_marker(fp['x'], fp['y'])
+
+                wp_pose = make_pose(fp['x'], fp['y'], fp['yaw'], self.nav)
+                self.nav.goToPose(wp_pose)
+
+                # Wait with stuck detection
+                stuck_check_count = 0
+                while not self.nav.isTaskComplete():
+                    time.sleep(0.2)
+                    stuck_check_count += 1
+                    if stuck_check_count % 50 == 0:  # Check every 10s
+                        if self._check_stuck_and_recover():
+                            break  # Recovery triggered, request new frontier
+
+                result = self.nav.getResult()
+                replan_data = {"command": "get_frontier"}
+                if result == TaskResult.SUCCEEDED:
+                    self.get_logger().info("✅ Reached Frontier successfully.")
+                else:
+                    self.get_logger().info("⚠️ Frontier imprecise, continuing anyway.")
+                
+                # ALWAYS blacklist the frontier we just explored.
+                # If SLAM cleared it, it won't be found again anyway.
+                # If SLAM didn't clear it (e.g. it's behind a wall), this prevents an infinite loop!
+                replan_data["failed_frontier"] = fp
+
+                time.sleep(1.0)
+                replan_msg = String()
+                replan_msg.data = json.dumps(replan_data)
+                self.replan_pub.publish(replan_msg)
+                return
+
+            # --- PHASE 2/3: COVERAGE MOWING WAYPOINTS ---
             if data.get('complete', False):
-                self.get_logger().info("Coverage planner says: ALL COVERED!")
-                self.state = STATE_COMPLETE
-                self._publish_progress("complete")
+                self.get_logger().info("✅ Coverage planner says: ALL COVERED!")
+                self._run_return_to_dock()
                 return
 
             waypoints = data.get('waypoints', [])
             if not waypoints:
                 self.get_logger().warn("Coverage planner returned 0 waypoints")
+                self._run_return_to_dock()
                 return
 
             self.coverage_waypoints = waypoints
             self.total_waypoints = self.total_completed + len(waypoints)
             self.get_logger().info(
-                f"Received {len(waypoints)} coverage waypoints from planner"
+                f"📋 Received {len(waypoints)} coverage waypoints"
             )
 
-            # If we were waiting for a plan, start mowing
-            if self.state in (STATE_WAITING_FOR_PLAN, STATE_REPLANNING):
+            # Visualize planned path
+            self._publish_planned_path(waypoints)
+
+            if self.state in (STATE_WAITING_FOR_PLAN, STATE_REPLANNING, STATE_MOWING):
                 self._run_coverage_mowing()
 
         except Exception as e:
-            self.get_logger().error(f"Failed to parse coverage waypoints: {e}")
+            self.get_logger().error(f"Failed to parse planner waypoints: {e}")
 
     def _coverage_status_cb(self, msg):
         try:
@@ -211,202 +380,51 @@ class GeminiMowExecutor(Node):
             pass
 
     # ================================================================== #
-    # Phase 1: Boundary Discovery
+    # Phase 1: Boundary Discovery (Frontier Exploration)
     # ================================================================== #
     def _run_boundary_discovery(self):
-        """
-        Drive a perimeter loop so SLAM can map the lawn boundaries.
-        Uses L-shaped waypoints that follow the world perimeter.
-        """
+        """Explore frontiers to build the SLAM map."""
         self.state = STATE_BOUNDARY_DISCOVERY
-        self.start_time = time.time()
+        self.start_time = self.get_clock().now().nanoseconds / 1e9
 
         print("=" * 60)
-        print("  PHASE 1: BOUNDARY DISCOVERY")
-        print("  Driving L-shaped perimeter for SLAM mapping...")
+        print("  PHASE 1: BOUNDARY DISCOVERY (Frontier Exploration)")
+        print("  Actively hunting frontiers to build SLAM map...")
         print("=" * 60)
 
         self._publish_progress("boundary_discovery")
+        time.sleep(2.0)
 
-        r = self.boundary_radius
-        # L-shaped perimeter: main rect + extension arm
-        # Main rectangle: (-r, -r) to (r, r*0.5)
-        # Extension: (-r, r*0.5) to (r*0.2, r)
-        perimeter_points = [
-            # Start near origin, go east along south side
-            (0.0, 0.0, 0.0),
-            (r * 0.8, 0.0, 0.0),
-            (r * 0.8, -r * 0.8, -math.pi/2),
-            # South-east corner, go west
-            (r * 0.8, -r * 0.8, math.pi),
-            (-r * 0.8, -r * 0.8, math.pi),
-            # South-west corner, go north
-            (-r * 0.8, -r * 0.8, math.pi/2),
-            (-r * 0.8, 0.0, math.pi/2),
-            (-r * 0.8, r * 0.8, math.pi/2),
-            # Extension top, go east
-            (-r * 0.8, r * 0.8, 0.0),
-            (0.0, r * 0.8, 0.0),
-            # Inner corner, go south then east
-            (0.0, r * 0.4, -math.pi/2),
-            (r * 0.8, r * 0.4, 0.0),
-            # North-east of main area, go south to close
-            (r * 0.8, 0.0, -math.pi/2),
-            # Return near start
-            (0.5, 0.0, math.pi),
-        ]
-
-        perimeter_wps = [
-            make_pose(x, y, yaw, self.nav)
-            for x, y, yaw in perimeter_points
-        ]
-
-        self.get_logger().info(
-            f"Starting boundary discovery with {len(perimeter_wps)} waypoints"
-        )
-
-        self.nav.followWaypoints(perimeter_wps)
-
-        i = 0
-        while not self.nav.isTaskComplete():
-            i += 1
-            rclpy.spin_once(self, timeout_sec=0.1)
-            feedback = self.nav.getFeedback()
-            if feedback and i % 30 == 0:
-                current_wp = feedback.current_waypoint
-                total = len(perimeter_wps)
-                self.get_logger().info(
-                    f"Boundary discovery: {current_wp}/{total} waypoints"
-                )
-                self._publish_progress("boundary_discovery")
-                if current_wp < total:
-                    wp = perimeter_wps[current_wp]
-                    self._mark_as_mowed(
-                        wp.pose.position.x, wp.pose.position.y
-                    )
-
-        result = self.nav.getResult()
-        if result == TaskResult.SUCCEEDED:
-            self.get_logger().info("Boundary discovery COMPLETE")
-        elif result == TaskResult.FAILED:
-            self.get_logger().warn(
-                "Boundary discovery partially failed — proceeding with available map"
-            )
-        elif result == TaskResult.CANCELED:
-            self.get_logger().info("Boundary discovery canceled")
-            self.state = STATE_STOPPED
-            return
-
-        self.get_logger().info("Waiting 3s for SLAM to finalize map...")
-        time.sleep(3.0)
-
-        # Transition to Phase 2
-        print("=" * 60)
-        print("  PHASE 2: COVERAGE MOWING")
-        print("  Requesting coverage plan from BCD planner...")
-        print("=" * 60)
-
-        self.state = STATE_WAITING_FOR_PLAN
-        self._publish_progress("waiting_for_plan")
-
-        # Trigger the coverage planner
         replan_msg = String()
-        replan_msg.data = json.dumps({"trigger": "boundary_discovery_complete"})
+        replan_msg.data = json.dumps({"command": "get_frontier"})
         self.replan_pub.publish(replan_msg)
-
-        # Fallback: if coverage planner doesn't respond, generate waypoints
-        self._wait_for_plan_or_fallback()
-
-    # ================================================================== #
-    # Fallback Plan Generation
-    # ================================================================== #
-    def _wait_for_plan_or_fallback(self):
-        """Wait for coverage planner response; generate fallback if timeout."""
-        deadline = time.time() + self.plan_timeout
-        self.get_logger().info(
-            f"Waiting up to {self.plan_timeout}s for coverage planner..."
-        )
-
-        while self.state == STATE_WAITING_FOR_PLAN:
-            rclpy.spin_once(self, timeout_sec=0.5)
-            if time.time() > deadline:
-                self.get_logger().warn(
-                    "Coverage planner timed out — using fallback waypoints"
-                )
-                fallback = self._generate_fallback_waypoints()
-                self.coverage_waypoints = fallback
-                self.total_waypoints = len(fallback)
-                self._run_coverage_mowing()
-                return
-
-        # If we exited the loop, _coverage_wp_cb handled it
-        self.get_logger().info("Coverage planner responded in time")
-
-    def _generate_fallback_waypoints(self):
-        """
-        Generate boustrophedon waypoints for the L-shaped lawn.
-        Main area: X[-8,8] Y[-8,3] and Extension: X[-8,0] Y[3,8].
-        """
-        waypoints = []
-        lane_width = 1.0
-
-        # Main rectangular area
-        y = -8.0
-        direction = 1
-        while y <= 3.0:
-            if direction == 1:
-                waypoints.append({'x': -8.0, 'y': y, 'yaw': 0.0})
-                waypoints.append({'x': 8.0, 'y': y, 'yaw': 0.0})
-            else:
-                waypoints.append({'x': 8.0, 'y': y, 'yaw': math.pi})
-                waypoints.append({'x': -8.0, 'y': y, 'yaw': math.pi})
-            direction *= -1
-            y += lane_width
-
-        # Extension arm (upper-left L section)
-        y = 4.0
-        while y <= 8.0:
-            if direction == 1:
-                waypoints.append({'x': -8.0, 'y': y, 'yaw': 0.0})
-                waypoints.append({'x': 0.0, 'y': y, 'yaw': 0.0})
-            else:
-                waypoints.append({'x': 0.0, 'y': y, 'yaw': math.pi})
-                waypoints.append({'x': -8.0, 'y': y, 'yaw': math.pi})
-            direction *= -1
-            y += lane_width
-
-        self.get_logger().info(
-            f"Generated {len(waypoints)} fallback waypoints "
-            f"(main + extension)"
-        )
-        return waypoints
 
     # ================================================================== #
     # Phase 2: Coverage Mowing
     # ================================================================== #
     def _run_coverage_mowing(self):
-        """Execute coverage waypoints from the BCD planner in batches."""
+        """Execute coverage waypoints with stuck detection and deviation tracking."""
         self.state = STATE_MOWING
         waypoints = self.coverage_waypoints
 
         if not waypoints:
             self.get_logger().warn("No waypoints to execute")
-            self.state = STATE_COMPLETE
+            self._run_return_to_dock()
             return
 
-        # Convert to PoseStamped
         poses = [make_pose(wp['x'], wp['y'], wp['yaw'], self.nav) for wp in waypoints]
         self.total_waypoints = self.total_completed + len(poses)
 
         self.get_logger().info(
-            f"Executing {len(poses)} coverage waypoints in batches of {self.batch_size}"
+            f"🚜 Mowing {len(poses)} waypoints in batches of {self.batch_size}"
         )
         self._publish_progress("mowing")
 
         batch_failed_wps = []
+        self.last_position = self._get_robot_position()
+        self.last_move_time = self.get_clock().now().nanoseconds / 1e9
 
         for batch_start in range(0, len(poses), self.batch_size):
-            # Check if we were stopped
             if self.state == STATE_STOPPED:
                 return
 
@@ -416,112 +434,125 @@ class GeminiMowExecutor(Node):
             batch_num = (batch_start // self.batch_size) + 1
             total_batches = (len(poses) + self.batch_size - 1) // self.batch_size
 
-            # ------- Hazard check -------
-            if self.hazard_data:
-                action = self.hazard_data.get('recommended_action', 'continue')
-                n_high = self.hazard_data.get('high_danger_count', 0)
-                if action == 'stop' and n_high > 0:
-                    self.get_logger().warn(
-                        f"[Hazard] HIGH DANGER ({n_high}) — pausing 5s"
-                    )
-                    self._publish_progress("paused_hazard")
-                    time.sleep(5.0)
-
             self.get_logger().info(
-                f"Batch {batch_num}/{total_batches} ({len(batch)} waypoints)"
+                f"📦 Batch {batch_num}/{total_batches} ({len(batch)} waypoints)"
             )
             self._publish_progress("mowing")
 
-            # ------- Execute batch -------
+            # Execute batch
             self.nav.followWaypoints(batch)
 
             i = 0
             last_wp_reached = 0
             while not self.nav.isTaskComplete():
                 i += 1
-                rclpy.spin_once(self, timeout_sec=0.1)
+                time.sleep(0.2)
                 feedback = self.nav.getFeedback()
-                if feedback and i % 30 == 0:
+                if feedback and i % 15 == 0:
                     current_wp = feedback.current_waypoint
                     last_wp_reached = current_wp
-                    overall = self.total_completed + batch_start + current_wp
                     self._publish_progress("mowing")
 
-                    # Mark waypoints as we pass them
+                    # Mark waypoints as mowed
                     for j in range(current_wp):
                         idx = batch_start + j
                         if idx < len(waypoints):
-                            self._mark_as_mowed(
-                                waypoints[idx]['x'], waypoints[idx]['y']
-                            )
+                            self._mark_as_mowed(waypoints[idx]['x'], waypoints[idx]['y'])
 
-                    # Check for state changes (stop command)
-                    if self.state == STATE_STOPPED:
-                        self.nav.cancelTask()
-                        return
+                # Stuck detection every 50 iterations (10s)
+                if i % 50 == 0:
+                    if self._check_stuck_and_recover():
+                        # Skip rest of batch after recovery
+                        break
+
+                if self.state == STATE_STOPPED:
+                    self.nav.cancelTask()
+                    return
 
             result = self.nav.getResult()
             if result == TaskResult.SUCCEEDED:
                 self.total_completed += len(batch)
                 self.get_logger().info(
-                    f"Batch {batch_num} DONE ({self.total_completed}/{self.total_waypoints})"
+                    f"✅ Batch {batch_num} DONE ({self.total_completed}/{self.total_waypoints})"
                 )
-                # Mark all batch waypoints as mowed
                 for wp in batch_wp_dicts:
                     self._mark_as_mowed(wp['x'], wp['y'])
 
             elif result == TaskResult.FAILED:
-                self.get_logger().warn(f"Batch {batch_num} FAILED")
-                # Track missed waypoints for re-planning
+                self.get_logger().warn(f"⚠️ Batch {batch_num} FAILED")
                 for j in range(last_wp_reached, len(batch_wp_dicts)):
                     idx = batch_start + j
                     if idx < len(waypoints):
                         batch_failed_wps.append(waypoints[idx])
-                # Mark successful ones
                 for j in range(last_wp_reached):
                     idx = batch_start + j
                     if idx < len(waypoints):
                         self._mark_as_mowed(waypoints[idx]['x'], waypoints[idx]['y'])
                 self.total_completed += last_wp_reached
-                time.sleep(2.0)
+                time.sleep(1.0)
 
             elif result == TaskResult.CANCELED:
                 self.get_logger().info(f"Batch {batch_num} canceled")
                 self.state = STATE_STOPPED
                 return
 
-        # ------- Phase 3: Re-plan for missed areas -------
-        if batch_failed_wps and self.replan_count < self.max_replan_attempts:
-            self.replan_count += 1
+        # After all batches: replan to check for missed areas
+        self.replan_count += 1
+        if self.replan_count <= self.max_replan_attempts:
             self.get_logger().info(
-                f"Re-planning for {len(batch_failed_wps)} missed waypoints "
-                f"(attempt {self.replan_count}/{self.max_replan_attempts})"
+                f"🔄 Replan #{self.replan_count}: checking for missed areas..."
             )
             self.state = STATE_REPLANNING
             self._publish_progress("replanning")
-
             replan_msg = String()
-            replan_msg.data = json.dumps({
-                "missed_waypoints": batch_failed_wps,
-                "attempt": self.replan_count,
-            })
+            replan_msg.data = json.dumps({"missed_waypoints": batch_failed_wps} if batch_failed_wps else {})
             self.replan_pub.publish(replan_msg)
-            # Coverage planner will respond with new waypoints → _coverage_wp_cb
-            return
+        else:
+            self.get_logger().info("Max replans reached, finishing up.")
+            self._run_return_to_dock()
 
-        # ------- Final report -------
+    # ================================================================== #
+    # Phase 3: Return to Dock
+    # ================================================================== #
+    def _run_return_to_dock(self):
+        """Navigate back to the starting position."""
+        self.state = STATE_RETURNING
+
+        print("=" * 60)
+        print("  PHASE 3: RETURNING TO DOCK")
+        print(f"  Navigating back to ({self.dock_position['x']:.1f}, {self.dock_position['y']:.1f})")
+        print("=" * 60)
+
+        self._publish_progress("returning_to_dock")
+
+        dock_pose = make_pose(
+            self.dock_position['x'],
+            self.dock_position['y'],
+            self.dock_position['yaw'],
+            self.nav
+        )
+
+        self.nav.goToPose(dock_pose)
+        while not self.nav.isTaskComplete():
+            time.sleep(0.5)
+
+        result = self.nav.getResult()
+        elapsed = (self.get_clock().now().nanoseconds / 1e9 - self.start_time) / 60.0
+
         self.state = STATE_COMPLETE
-        elapsed = time.time() - self.start_time
 
-        print("\n" + "=" * 60)
-        print("  MOWING COMPLETE!")
-        print(f"  Waypoints executed: {self.total_completed}")
-        if batch_failed_wps:
-            print(f"  Missed waypoints: {len(batch_failed_wps)}")
-        print(f"  Total time: {elapsed/60:.1f} minutes")
-        print(f"  Re-plan attempts: {self.replan_count}")
+        coverage_pct = 0
         if self.coverage_status:
-            print(f"  Coverage: {self.coverage_status.get('coverage_percent', '?')}%")
+            coverage_pct = self.coverage_status.get('coverage_percent', 0)
+
+        print("=" * 60)
+        print("  🎉 MOWING COMPLETE!")
+        print(f"  Coverage: {coverage_pct:.1f}%")
+        print(f"  Time: {elapsed:.1f} minutes")
+        print(f"  Frontiers explored: {self.frontiers_explored}")
+        print(f"  Waypoints completed: {self.total_completed}")
+        print(f"  Replans: {self.replan_count}")
+        print(f"  Recoveries: {self.recovery_count}")
         print("=" * 60)
 
         self._publish_progress("complete")
@@ -537,7 +568,8 @@ class GeminiMowExecutor(Node):
 
     def _publish_progress(self, status):
         """Publish progress to /mow_progress."""
-        elapsed = time.time() - self.start_time if self.start_time > 0 else 0
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        elapsed = current_time - self.start_time if self.start_time > 0 else 0
         total = self.total_waypoints if self.total_waypoints > 0 else 1
         pct = min(100.0, self.total_completed / total * 100)
 
@@ -548,6 +580,10 @@ class GeminiMowExecutor(Node):
         else:
             eta = 0.0
 
+        coverage_pct = 0
+        if self.coverage_status:
+            coverage_pct = self.coverage_status.get('coverage_percent', 0)
+
         progress = {
             "state": self.state,
             "status": status,
@@ -557,21 +593,193 @@ class GeminiMowExecutor(Node):
             "estimated_minutes_remaining": round(eta, 1),
             "elapsed_seconds": round(elapsed, 1),
             "replan_count": self.replan_count,
+            "coverage_percent": round(coverage_pct, 1),
+            "frontiers_explored": self.frontiers_explored,
+            "recoveries": self.recovery_count,
+            "pass": self.current_pass,
         }
-
-        if self.coverage_status:
-            progress["coverage_percent"] = self.coverage_status.get(
-                'coverage_percent', 0
-            )
 
         msg = String()
         msg.data = json.dumps(progress)
         self.progress_pub.publish(msg)
 
+        state_emoji = {
+            "boundary_discovery": "🔍",
+            "waiting_for_plan": "⏳",
+            "mowing": "🚜",
+            "replanning": "🔄",
+            "returning_to_dock": "🏠",
+            "complete": "🎉",
+            "stopped_by_user": "⏹️",
+        }.get(status, "📊")
+
         self.get_logger().info(
-            f"[{status}] {pct:.0f}% | {self.total_completed}/{total} | "
-            f"ETA: {eta:.1f}min"
+            f"{state_emoji} [{status}] {pct:.0f}% | {self.total_completed}/{total} | "
+            f"Coverage: {coverage_pct:.0f}% | ETA: {eta:.1f}min"
         )
+
+    # ================================================================== #
+    # RViz Visualization
+    # ================================================================== #
+    def _update_trail(self):
+        """Timer callback: record robot trail and publish visualization."""
+        pos = self._get_robot_position()
+        if pos is None:
+            return
+
+        self.trail_points.append((pos[0], pos[1], self.state))
+        self._publish_trail_marker()
+
+    def _publish_trail_marker(self):
+        """Publish the robot trail as a colored line strip in RViz."""
+        if len(self.trail_points) < 2:
+            return
+
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'robot_trail'
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.08  # Line width
+        marker.pose.orientation.w = 1.0
+
+        for x, y, state in self.trail_points:
+            from geometry_msgs.msg import Point
+            p = Point()
+            p.x = float(x)
+            p.y = float(y)
+            p.z = 0.05
+            marker.points.append(p)
+
+            c = ColorRGBA()
+            if state == STATE_MOWING:
+                c.r, c.g, c.b, c.a = 0.0, 0.9, 0.0, 0.9  # Green: mowing
+            elif state == STATE_BOUNDARY_DISCOVERY:
+                c.r, c.g, c.b, c.a = 0.2, 0.5, 1.0, 0.9  # Blue: exploring
+            elif state == STATE_RETURNING:
+                c.r, c.g, c.b, c.a = 1.0, 0.8, 0.0, 0.9  # Yellow: returning
+            else:
+                c.r, c.g, c.b, c.a = 0.5, 0.5, 0.5, 0.5  # Grey: idle
+            marker.colors.append(c)
+
+        self.trail_pub.publish(marker)
+
+    def _publish_planned_path(self, waypoints):
+        """Publish planned coverage waypoints as yellow spheres."""
+        marker_array = MarkerArray()
+
+        # Clear old markers
+        clear = Marker()
+        clear.header.frame_id = 'map'
+        clear.header.stamp = self.get_clock().now().to_msg()
+        clear.ns = 'planned_waypoints'
+        clear.action = Marker.DELETEALL
+        marker_array.markers.append(clear)
+
+        for i, wp in enumerate(waypoints):
+            m = Marker()
+            m.header.frame_id = 'map'
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = 'planned_waypoints'
+            m.id = i + 1
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(wp['x'])
+            m.pose.position.y = float(wp['y'])
+            m.pose.position.z = 0.05
+            m.pose.orientation.w = 1.0
+            m.scale.x = 0.15
+            m.scale.y = 0.15
+            m.scale.z = 0.15
+            m.color.r = 1.0
+            m.color.g = 0.9
+            m.color.b = 0.0
+            m.color.a = 0.6
+            marker_array.markers.append(m)
+
+        self.waypoint_pub.publish(marker_array)
+        self.get_logger().info(f"Published {len(waypoints)} waypoint markers to RViz")
+
+    def _publish_frontier_marker(self, x, y):
+        """Publish frontier target as an orange sphere."""
+        marker_array = MarkerArray()
+        m = Marker()
+        m.header.frame_id = 'map'
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = 'frontier_target'
+        m.id = self.frontiers_explored
+        m.type = Marker.SPHERE
+        m.action = Marker.ADD
+        m.pose.position.x = float(x)
+        m.pose.position.y = float(y)
+        m.pose.position.z = 0.1
+        m.pose.orientation.w = 1.0
+        m.scale.x = 0.4
+        m.scale.y = 0.4
+        m.scale.z = 0.4
+        m.color.r = 1.0
+        m.color.g = 0.5
+        m.color.b = 0.0
+        m.color.a = 0.8
+        m.lifetime.sec = 0  # Persist forever
+        marker_array.markers.append(m)
+        self.frontier_pub.publish(marker_array)
+
+    def _publish_status_overlay(self):
+        """Publish a text marker showing current state in RViz."""
+        if self.state == STATE_IDLE:
+            return
+
+        pos = self._get_robot_position()
+        if pos is None:
+            return
+
+        coverage_pct = 0
+        if self.coverage_status:
+            coverage_pct = self.coverage_status.get('coverage_percent', 0)
+
+        total = self.total_waypoints if self.total_waypoints > 0 else 1
+        wp_pct = min(100.0, self.total_completed / total * 100)
+
+        state_labels = {
+            STATE_BOUNDARY_DISCOVERY: "🔍 EXPLORING",
+            STATE_WAITING_FOR_PLAN: "⏳ PLANNING",
+            STATE_MOWING: "🚜 MOWING",
+            STATE_REPLANNING: "🔄 REPLANNING",
+            STATE_RETURNING: "🏠 RETURNING",
+            STATE_COMPLETE: "🎉 DONE",
+            STATE_STOPPED: "⏹ STOPPED",
+        }
+
+        elapsed = (self.get_clock().now().nanoseconds / 1e9 - self.start_time) / 60.0
+
+        text = (
+            f"{state_labels.get(self.state, self.state)}\n"
+            f"Waypoints: {self.total_completed}/{total} ({wp_pct:.0f}%)\n"
+            f"Coverage: {coverage_pct:.0f}%\n"
+            f"Time: {elapsed:.1f}min"
+        )
+
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'status_text'
+        marker.id = 0
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        marker.pose.position.x = pos[0]
+        marker.pose.position.y = pos[1]
+        marker.pose.position.z = 1.5
+        marker.pose.orientation.w = 1.0
+        marker.scale.z = 0.5
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        marker.color.a = 0.9
+        marker.text = text
+        self.status_marker_pub.publish(marker)
 
 
 def main():
@@ -582,36 +790,28 @@ def main():
     nav.set_parameters([param])
 
     print("=" * 60)
-    print("  GEMINI AI MOW EXECUTOR — Real-World Ready")
+    print("  🤖 GEMINI AI MOW EXECUTOR — Demo Mode")
     print("  Waiting for Nav2 navigation servers...")
     print("=" * 60)
 
-    # With SLAM toolbox, we skip the localizer check entirely.
-    # SLAM provides map->odom, local EKF provides odom->base_footprint.
-    # 'robot_localization' is the special flag that skips the localizer wait
-    # in BasicNavigator (it's a non-lifecycle node, so it skips _waitForNodeToActivate).
     nav.waitUntilNav2Active(localizer='robot_localization')
     print("Nav2 is active!")
 
-    # No setInitialPose needed — SLAM starts at origin automatically.
-    # Just give SLAM a moment to initialize with first scans.
     print("Waiting 8s for SLAM to initialize with LiDAR scans...")
     time.sleep(8.0)
 
     executor_node = GeminiMowExecutor(nav)
+    executor_node.set_parameters([Parameter('use_sim_time', Parameter.Type.BOOL, True)])
 
-    if executor_node.auto_start:
-        print("\nAuto-starting mowing sequence...")
-        auto_msg = String()
-        auto_msg.data = "Mow the yard"
-        executor_node._command_cb(auto_msg)
-    else:
-        print("\nReady! Send a mowing command:")
-        print("  ros2 topic pub --once /mow_command std_msgs/msg/String "
-              "\"data: 'Mow the yard'\"")
+    print("\n🏁 Auto-starting mowing sequence...")
+    executor_node._command_cb(String(data='auto_mow'))
 
     try:
-        rclpy.spin(executor_node)
+        executor = MultiThreadedExecutor()
+        # NOTE: Do NOT add nav (BasicNavigator) — it uses
+        # rclpy.spin_until_future_complete() internally.
+        executor.add_node(executor_node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
 
