@@ -38,7 +38,7 @@ class GeminiMowPlanner(Node):
         self.declare_parameter('yard_y_min', -9.5)
         self.declare_parameter('yard_y_max', 9.5)
         self.declare_parameter('safe_margin', 2.5)
-        self.declare_parameter('default_lane_width', 1.0)
+        self.declare_parameter('default_lane_width', 0.3)
 
         self.api_key = self.get_parameter('api_key').get_parameter_value().string_value
         camera_topic = self.get_parameter('camera_topic').get_parameter_value().string_value
@@ -58,7 +58,7 @@ class GeminiMowPlanner(Node):
             try:
                 from google import genai
                 self.client = genai.Client(api_key=self.api_key)
-                self.model_name = "gemini-2.0-flash"
+                self.model_name = "gemini-robotics-er-1.5-preview"
                 self.api_available = True
                 self.get_logger().info(f"Gemini API ready (model: {self.model_name})")
             except Exception as e:
@@ -155,6 +155,12 @@ YARD CONTEXT:
 - Coordinate system: X = east, Y = north
 {objects_context}
 
+VISION AND SEMANTIC MAPPING INSTRUCTIONS:
+- Analyze the provided camera image.
+- Identify any obstacles or objects on the lawn (e.g., garden gnomes, hoses, toys, pets) and add them to the `exclusion_zones` array.
+- The camera is front-facing. Assume any newly identified object in the image is approximately 2.0 meters directly ahead of the robot at its start position (0, 2) since the camera faces forward. So add exclusion zones around (0, 2) for objects found.
+- If no image is provided, rely on default exclusions.
+
 USER COMMAND: "{command}"
 
 Generate a mowing plan as a JSON object with EXACTLY these fields:
@@ -178,7 +184,7 @@ RULES FOR WAYPOINT GENERATION:
 3. Each waypoint needs x, y coordinates and yaw (heading in radians: 0=east, pi/2=north, pi=west, -pi/2=south)
 4. For eastward lanes yaw=0.0, for westward lanes yaw=3.14159
 5. Lane endpoints should stay within the safe mowable area
-6. If the user says "skip" something, add it as an exclusion zone
+6. If the user says "skip" something, or if you visually identify an obstacle, add it as an exclusion zone
 7. If the user says "quick" or "hurry", increase lane_width to 1.5 or 2.0
 8. Start from the bottom-left corner and work upward
 
@@ -186,9 +192,16 @@ IMPORTANT: Return ONLY the JSON object, no markdown fences, no extra text."""
 
             parts.append(types.Part.from_text(text=prompt))
 
+            generate_content_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=-1,
+                ),
+            )
+
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=[types.Content(role="user", parts=parts)],
+                config=generate_content_config,
             )
 
             raw = response.text.strip()

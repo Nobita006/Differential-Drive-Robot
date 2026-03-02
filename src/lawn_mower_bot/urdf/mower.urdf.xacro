@@ -270,6 +270,38 @@
         <plugin name="gz::sim::systems::JointStatePublisher" filename="gz-sim-joint-state-publisher-system">
             <topic>/joint_states</topic>
         </plugin>
+        
+        <plugin filename="gz-sim-particle-emitter-system" name="gz::sim::systems::ParticleEmitter">
+        </plugin>
+    </gazebo>
+
+    <!-- GRASS PARTICLE EMITTER (Simulates the blade cutting grass) -->
+    <link name="blade_link">
+        <pose>0 0 0.02 0 0 0</pose>
+    </link>
+    <joint name="blade_joint" type="fixed">
+        <parent link="base_link" />
+        <child link="blade_link" />
+        <origin xyz="-0.1 0 -0.05" rpy="0 0 0" />
+    </joint>
+
+    <gazebo reference="blade_link">
+        <particle_emitter name="grass_emitter" type="box">
+            <emitting>false</emitting>
+            <size>0.3 0.2 0</size>
+            <particle_size>0.02 0.02 0.02</particle_size>
+            <lifetime>2.0</lifetime>
+            <min_velocity>0.1</min_velocity>
+            <max_velocity>0.3</max_velocity>
+            <rate>200</rate>
+            <scale_rate>0</scale_rate>
+            <scatter_ratio>0.2</scatter_ratio>
+            <material>
+                <ambient>0.0 0.8 0.0 1.0</ambient>
+                <diffuse>0.0 0.8 0.0 1.0</diffuse>
+            </material>
+            <topic>/mower_blade_state</topic>
+        </particle_emitter>
     </gazebo>
 
 </robot>

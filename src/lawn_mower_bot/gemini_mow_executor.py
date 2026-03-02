@@ -25,7 +25,7 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from geometry_msgs.msg import PoseStamped, Quaternion
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
-from std_msgs.msg import String, ColorRGBA
+from std_msgs.msg import String, ColorRGBA, Bool
 from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.parameter import Parameter
@@ -85,7 +85,7 @@ class GeminiMowExecutor(Node):
         self.declare_parameter('max_replan_attempts', 3)
         self.declare_parameter('mow_mark_radius', 0.5)
         self.declare_parameter('plan_timeout', 60.0)
-        self.declare_parameter('stuck_timeout', 25.0)
+        self.declare_parameter('stuck_timeout', 5.0)
         self.declare_parameter('stuck_distance', 0.08)
 
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
@@ -125,6 +125,7 @@ class GeminiMowExecutor(Node):
         self.replan_pub = self.create_publisher(String, '/coverage/replan', 10)
         self.progress_pub = self.create_publisher(String, '/mow_progress', 10)
         self.mark_mowed_pub = self.create_publisher(String, '/coverage/mark_mowed', 10)
+        self.blade_pub = self.create_publisher(Bool, '/mower_blade_state', 10)
 
         # Visualization publishers
         self.trail_pub = self.create_publisher(Marker, '/viz/robot_trail', 10)
@@ -195,6 +196,8 @@ class GeminiMowExecutor(Node):
                 )
                 self.recovery_count += 1
 
+                self._set_blade_state(False)
+
                 # Cancel current task
                 self.nav.cancelTask()
                 time.sleep(0.5)
@@ -262,8 +265,17 @@ class GeminiMowExecutor(Node):
         if pos:
             self.dock_position = {'x': pos[0], 'y': pos[1], 'yaw': pos[2]}
 
-        # Start Phase 1: Boundary Discovery
         self._run_boundary_discovery()
+
+    def _set_blade_state(self, is_active: bool):
+        """Turn the virtual mower blade (and Gazebo particles) on or off."""
+        msg = Bool()
+        msg.data = is_active
+        self.blade_pub.publish(msg)
+        if is_active:
+            self.get_logger().info("⚔️ Blades: ON")
+        else:
+            self.get_logger().info("⚔️ Blades: OFF")
 
     def _coverage_wp_cb(self, msg):
         """Receive coverage waypoints or frontier targets from the planner."""
@@ -392,8 +404,15 @@ class GeminiMowExecutor(Node):
         print("  Actively hunting frontiers to build SLAM map...")
         print("=" * 60)
 
+        self._set_blade_state(False)
         self._publish_progress("boundary_discovery")
         time.sleep(2.0)
+
+        # Do a 360 spin to build a good initial map!
+        self.get_logger().info("Spinning 360 to build initial map...")
+        self.nav.spin(spin_dist=6.28, time_allowance=20)
+        while not self.nav.isTaskComplete():
+            time.sleep(0.5)
 
         replan_msg = String()
         replan_msg.data = json.dumps({"command": "get_frontier"})
@@ -419,6 +438,7 @@ class GeminiMowExecutor(Node):
             f"🚜 Mowing {len(poses)} waypoints in batches of {self.batch_size}"
         )
         self._publish_progress("mowing")
+        self._set_blade_state(True)
 
         batch_failed_wps = []
         self.last_position = self._get_robot_position()
@@ -516,6 +536,7 @@ class GeminiMowExecutor(Node):
     # ================================================================== #
     def _run_return_to_dock(self):
         """Navigate back to the starting position."""
+        self._set_blade_state(False)
         self.state = STATE_RETURNING
 
         print("=" * 60)

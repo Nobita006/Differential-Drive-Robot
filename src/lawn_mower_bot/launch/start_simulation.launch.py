@@ -16,7 +16,7 @@ def generate_launch_description():
     subprocess.run(
         'killall -9 async_slam_toolbox_node controller_server planner_server '
         'behavior_server bt_navigator waypoint_follower lifecycle_manager '
-        'ekf_node parameter_bridge rviz2 2>/dev/null; '
+        'ekf_node parameter_bridge rviz2 ruby gz sim gazebo 2>/dev/null; '
         'pkill -9 -f coverage_planner 2>/dev/null; '
         'pkill -9 -f gemini_mow 2>/dev/null; '
         'ros2 daemon stop 2>/dev/null; '
@@ -69,6 +69,8 @@ def generate_launch_description():
             '/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
             # LiDAR (Gazebo -> ROS)
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
+            # Blade State / Particle Emitter (ROS -> Gazebo)
+            '/mower_blade_state@std_msgs/msg/Bool]gz.msgs.Boolean',
         ],
         output='screen'
     )
@@ -88,7 +90,7 @@ def generate_launch_description():
     spawn_entity = Node(
         package='ros_gz_sim',
         executable='create',
-        arguments=['-name', 'lawn_mower', '-topic', 'robot_description', '-z', '0.2'],
+        arguments=['-name', 'lawn_mower', '-topic', 'robot_description', '-z', '0.2', '-x', '0.0', '-y', '0.0', '-Y', '0.0'],
         output='screen'
     )
 

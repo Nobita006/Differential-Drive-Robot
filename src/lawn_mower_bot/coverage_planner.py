@@ -31,10 +31,10 @@ class CoveragePlanner(Node):
         super().__init__('coverage_planner')
 
         # ---------- Parameters ----------
-        self.declare_parameter('lane_width', 1.0)
-        self.declare_parameter('robot_radius', 0.15)
+        self.declare_parameter('lane_width', 0.3)
+        self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('safety_margin', 0.5)
-        self.declare_parameter('min_map_coverage', 0.05)  # min free cells before planning
+        self.declare_parameter('min_map_coverage', 0.01)  # min free cells before planning
 
         self.lane_width = self.get_parameter('lane_width').get_parameter_value().double_value
         self.robot_radius = self.get_parameter('robot_radius').get_parameter_value().double_value
@@ -207,6 +207,41 @@ class CoveragePlanner(Node):
                     free_mask[gy, gx] = False
 
         return free_mask
+
+    def _perimeter_on_free_space(self, free_mask):
+        """Generate waypoints tracing the outer contour of the free space."""
+        import cv2
+        waypoints = []
+        mask_uint8 = (free_mask * 255).astype(np.uint8)
+        
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return waypoints
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Sample points along the contour (roughly every 0.5 meters)
+        step = max(1, int(0.5 / self.map_info.resolution))
+        if step >= len(largest_contour):
+            step = 1
+            
+        pts = largest_contour[::step]
+        if len(pts) < 2:
+            return waypoints
+            
+        for i in range(len(pts)):
+            pt1 = pts[i][0]
+            pt2 = pts[(i+1)%len(pts)][0]
+            gx, gy = float(pt1[0]), float(pt1[1])
+            wx, wy = self._grid_to_world(gx, gy)
+            
+            gx2, gy2 = float(pt2[0]), float(pt2[1])
+            wx2, wy2 = self._grid_to_world(gx2, gy2)
+            yaw = math.atan2(wy2 - wy, wx2 - wx)
+            
+            waypoints.append({"x": float(wx), "y": float(wy), "yaw": float(yaw)})
+            
+        return waypoints
 
     def _boustrophedon_on_free_space(self, free_mask):
         """
@@ -468,8 +503,18 @@ class CoveragePlanner(Node):
                     if self._is_in_exclusion_zone(wx, wy):
                         free_mask[gy, gx] = False
 
-        # Step 2: BCD coverage
-        waypoints = self._boustrophedon_on_free_space(free_mask)
+        # Step 2: Coverage Generation (Perimeter + Boustrophedon)
+        waypoints = self._perimeter_on_free_space(free_mask)
+        
+        # Erode the mask by lane_width so interior boustrophedon doesn't overlap edges
+        try:
+            from scipy import ndimage
+            lane_cells = max(1, int(self.lane_width / self.map_info.resolution))
+            inner_mask = ndimage.binary_erosion(free_mask, iterations=lane_cells)
+        except ImportError:
+            inner_mask = free_mask
+            
+        waypoints.extend(self._boustrophedon_on_free_space(inner_mask))
 
         # Step 3: Remove already-mowed areas
         waypoints = self._remove_mowed_waypoints(waypoints)
