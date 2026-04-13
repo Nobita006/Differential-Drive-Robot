@@ -22,7 +22,7 @@ import time
 import json
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from geometry_msgs.msg import PoseStamped, Quaternion
+from geometry_msgs.msg import PoseStamped, Quaternion, Point
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import String, ColorRGBA, Bool
@@ -81,11 +81,11 @@ class GeminiMowExecutor(Node):
 
         # ---------- Parameters ----------
         self.declare_parameter('auto_start', False)
-        self.declare_parameter('batch_size', 6)
+        self.declare_parameter('batch_size', 20)
         self.declare_parameter('max_replan_attempts', 3)
         self.declare_parameter('mow_mark_radius', 0.5)
         self.declare_parameter('plan_timeout', 60.0)
-        self.declare_parameter('stuck_timeout', 5.0)
+        self.declare_parameter('stuck_timeout', 15.0)
         self.declare_parameter('stuck_distance', 0.08)
 
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
@@ -126,6 +126,7 @@ class GeminiMowExecutor(Node):
         self.progress_pub = self.create_publisher(String, '/mow_progress', 10)
         self.mark_mowed_pub = self.create_publisher(String, '/coverage/mark_mowed', 10)
         self.blade_pub = self.create_publisher(Bool, '/mower_blade_state', 10)
+        self.painter_pub = self.create_publisher(String, '/mower_painter/image', 10)
 
         # Visualization publishers
         self.trail_pub = self.create_publisher(Marker, '/viz/robot_trail', 10)
@@ -150,6 +151,21 @@ class GeminiMowExecutor(Node):
         self.get_logger().info(
             "GeminiMowExecutor ready — send a command to /mow_command to begin"
         )
+        
+        # Fire a one-shot timer to immediately clear any ghost markers left by RViz
+        # Wait until 5 seconds have passed so RViz has time to subscribe to the topics
+        self.cleanup_timer = self.create_timer(5.0, self._initial_cleanup_cb, callback_group=self.cb_group)
+        self.cleanup_attempts = 0
+
+    def _initial_cleanup_cb(self):
+        """Timer callback to run visual cleanup at boot, repeating a few times to ensure reception."""
+        self.get_logger().info("🧹 Performing initial RViz marker cleanup...")
+        self._clear_rviz_markers()
+        self.cleanup_attempts += 1
+        
+        # Try 3 times, spaced 5 seconds apart, to guarantee RViz gets the memo
+        if self.cleanup_attempts >= 3:
+            self.cleanup_timer.cancel()
 
     # ================================================================== #
     # Robot Position Helper
@@ -190,11 +206,24 @@ class GeminiMowExecutor(Node):
                 return False
 
             if (now - self.last_move_time) > self.stuck_timeout:
+                self.recovery_count += 1
+
+                # Give up after 5 recovery attempts — skip the current goal
+                if self.recovery_count > 5:
+                    self.get_logger().error(
+                        "🛑 Max recoveries reached (5). Skipping current goal."
+                    )
+                    self.nav.cancelTask()
+                    time.sleep(0.5)
+                    self.last_position = self._get_robot_position()
+                    self.last_move_time = self.get_clock().now().nanoseconds / 1e9
+                    self.recovery_count = 0
+                    return True
+
                 self.get_logger().warn(
                     f"🚨 STUCK DETECTED! No movement for {self.stuck_timeout}s. "
-                    f"Triggering recovery (attempt #{self.recovery_count + 1})"
+                    f"Triggering recovery (attempt #{self.recovery_count})"
                 )
-                self.recovery_count += 1
 
                 self._set_blade_state(False)
 
@@ -265,13 +294,44 @@ class GeminiMowExecutor(Node):
         if pos:
             self.dock_position = {'x': pos[0], 'y': pos[1], 'yaw': pos[2]}
 
+        self._clear_rviz_markers()
         self._run_boundary_discovery()
 
+    def _clear_rviz_markers(self):
+        """Send DELETEALL action to all visual markers to clear ghost trails from previous runs."""
+        clear = Marker()
+        clear.header.frame_id = 'map'
+        clear.header.stamp = self.get_clock().now().to_msg()
+        clear.action = Marker.DELETEALL
+        
+        # Clear trail
+        clear.ns = 'robot_trail'
+        self.trail_pub.publish(clear)
+        
+        # Clear planned waypoints
+        clear_array = MarkerArray()
+        clear_wp = Marker()
+        clear_wp.header = clear.header
+        clear_wp.ns = 'planned_waypoints'
+        clear_wp.action = Marker.DELETEALL
+        clear_array.markers.append(clear_wp)
+        self.waypoint_pub.publish(clear_array)
+        
+        # Clear frontiers
+        clear_frontier = MarkerArray()
+        clear_f = Marker()
+        clear_f.header = clear.header
+        clear_f.ns = 'frontier_target'
+        clear_f.action = Marker.DELETEALL
+        clear_frontier.markers.append(clear_f)
+        self.frontier_pub.publish(clear_frontier)
+
     def _set_blade_state(self, is_active: bool):
-        """Turn the virtual mower blade (and Gazebo particles) on or off."""
+        """Turn the virtual mower blade on or off."""
         msg = Bool()
         msg.data = is_active
         self.blade_pub.publish(msg)
+        
         if is_active:
             self.get_logger().info("⚔️ Blades: ON")
         else:
@@ -315,6 +375,19 @@ class GeminiMowExecutor(Node):
 
                 fp = waypoints[0]
                 self.frontiers_explored += 1
+
+                # Safety: cap frontier exploration to prevent infinite loops
+                if self.frontiers_explored > 30:
+                    self.get_logger().warn(
+                        "⚠️ Explored 30 frontiers — force-completing boundary discovery."
+                    )
+                    self.state = STATE_WAITING_FOR_PLAN
+                    self._publish_progress("waiting_for_plan")
+                    replan_msg = String()
+                    replan_msg.data = json.dumps({"trigger": "boundary_discovery_complete"})
+                    self.replan_pub.publish(replan_msg)
+                    return
+
                 self.get_logger().info(
                     f"🔍 Frontier #{self.frontiers_explored}: ({fp['x']:.2f}, {fp['y']:.2f})"
                 )
@@ -448,6 +521,7 @@ class GeminiMowExecutor(Node):
             if self.state == STATE_STOPPED:
                 return
 
+            self.recovery_count = 0  # Reset per-batch recovery counter
             batch_end = min(batch_start + self.batch_size, len(poses))
             batch = poses[batch_start:batch_end]
             batch_wp_dicts = waypoints[batch_start:batch_end]
@@ -649,7 +723,14 @@ class GeminiMowExecutor(Node):
             return
 
         self.trail_points.append((pos[0], pos[1], self.state))
+        # Cap trail to prevent unbounded memory growth on long runs
+        if len(self.trail_points) > 5000:
+            self.trail_points = self.trail_points[-5000:]
         self._publish_trail_marker()
+        
+        # Real-time footprint logging: constantly mark ground as mowed during action
+        if self.state == STATE_MOWING:
+            self._mark_as_mowed(pos[0], pos[1])
 
     def _publish_trail_marker(self):
         """Publish the robot trail as a colored line strip in RViz."""
@@ -667,7 +748,6 @@ class GeminiMowExecutor(Node):
         marker.pose.orientation.w = 1.0
 
         for x, y, state in self.trail_points:
-            from geometry_msgs.msg import Point
             p = Point()
             p.x = float(x)
             p.y = float(y)

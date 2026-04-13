@@ -16,11 +16,11 @@ def generate_launch_description():
     subprocess.run(
         'killall -9 async_slam_toolbox_node controller_server planner_server '
         'behavior_server bt_navigator waypoint_follower lifecycle_manager '
-        'ekf_node parameter_bridge rviz2 ruby gz sim gazebo 2>/dev/null; '
-        'pkill -9 -f coverage_planner 2>/dev/null; '
-        'pkill -9 -f gemini_mow 2>/dev/null; '
+        'ekf_node parameter_bridge rviz2 ruby gz sim gazebo _ros2_daemon 2>/dev/null; '
+        'pgrep -f "gemini_mow_executor" | xargs -r kill -9; '
+        'pgrep -f "coverage_planner" | xargs -r kill -9; '
         'ros2 daemon stop 2>/dev/null; '
-        'rm -f ~/.ros/*.posegraph ~/.ros/*.data',
+        'rm -rf ~/.ros/*.posegraph ~/.ros/*.data ~/.ros/log/*',
         shell=True
     )
     print('[launch] Previous session cleaned. Starting fresh.')
@@ -71,6 +71,8 @@ def generate_launch_description():
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             # Blade State / Particle Emitter (ROS -> Gazebo)
             '/mower_blade_state@std_msgs/msg/Bool]gz.msgs.Boolean',
+            # Mowed Grass Projector (ROS -> Gazebo)
+            '/mower_painter/image@std_msgs/msg/String]gz.msgs.StringMsg',
         ],
         output='screen'
     )

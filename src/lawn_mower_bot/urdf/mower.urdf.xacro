@@ -273,6 +273,21 @@
         
         <plugin filename="gz-sim-particle-emitter-system" name="gz::sim::systems::ParticleEmitter">
         </plugin>
+        
+        <!-- The Projector plugin allows us to project a texture onto the environment -->
+        <plugin filename="gz-sim-projector-system" name="gz::sim::systems::Projector">
+        </plugin>
+    </gazebo>
+
+    <!-- MOWED GRASS PROJECTOR (Paints the ground dark green) -->
+    <gazebo reference="base_link">
+        <projector name="mower_painter">
+            <pose>0 0 0.1 0 1.5707 0</pose>
+            <fov>1.0</fov>
+            <near_clip>0.01</near_clip>
+            <far_clip>1.0</far_clip>
+            <visibility_flags>0x01</visibility_flags>
+        </projector>
     </gazebo>
 
     <!-- GRASS PARTICLE EMITTER (Simulates the blade cutting grass) -->

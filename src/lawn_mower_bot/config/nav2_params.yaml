@@ -29,7 +29,7 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15  # Allow finishing within 15cm of the exact spot
-      yaw_goal_tolerance: 0.25 # Require exact vehicle heading at the waypoint before calling it done
+      yaw_goal_tolerance: 3.15 # ANY yaw allowed! Prevents "orbiting" the point if yaw was off.
       stateful: True
 
     transform_tolerance: 1.0
@@ -46,15 +46,14 @@ controller_server:
       
       # LOOKAHEAD (The "Carrot")
       # It will look ahead. If the path turns, it steers towards that point.
-      lookahead_dist: 0.6
-      min_lookahead_dist: 0.3
+      lookahead_dist: 0.8
+      min_lookahead_dist: 0.4
       max_lookahead_dist: 1.5
-      lookahead_time: 1.0
+      lookahead_time: 1.2
       
       # ROTATION LOGIC 
-      # Very small angle to force the robot to STOP and rotate in place 
-      # before moving forward again, creating point-turns.
-      rotate_to_heading_min_angle: 0.1
+      # Higher threshold: smoothly arc unless deviation is >45 deg.
+      rotate_to_heading_min_angle: 0.785
       
       # VELOCITY SCALING (Curvature & Approach)
       # Slow the robot from 1.5 m/s down to 0.3 m/s on sharp turns, and slow down as it approaches targets.
@@ -65,13 +64,13 @@ controller_server:
       approach_velocity_scaling_dist: 0.8
       
       # SAFETY
-      use_collision_detection: true # Re-enabling collision detection so it avoids clipping the tree
+      use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 0.3
       
       # TUNING
       transform_tolerance: 1.0
+      # When true, lookahead_dist is scaled by current speed (smoother arcing at high speed)
       use_velocity_scaled_lookahead_dist: true
-      approach_velocity_scaling_dist: 0.6
       
       # DYNAMICS
       max_linear_accel: 1.5
@@ -82,21 +81,10 @@ planner_server:
     use_sim_time: True
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_smac_planner::SmacPlanner2D"
+      plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
-      downsample_costmap: false
-      downsampling_factor: 1
+      use_astar: false
       allow_unknown: true
-      max_iterations: 1000000
-      max_on_approach_iterations: 1000
-      max_planning_time: 1.0
-      motion_model_for_search: "MOORE" # Use purely grid-based horizontal/vertical straight lines
-      angle_quantization_bins: 16
-      analytic_expansion_ratio: 3.5
-      minimum_turning_radius: 0.2
-      reverse_penalty: 2.0
-      cache_obstacle_map: true
-      lookup_table_size: 20.0
 
 global_costmap:
   global_costmap:
@@ -207,7 +195,7 @@ waypoint_follower:
   ros__parameters:
     use_sim_time: True
     loop_rate: 20
-    stop_on_failure: true
+    stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
     wait_at_waypoint:
       plugin: "nav2_waypoint_follower::WaitAtWaypoint"

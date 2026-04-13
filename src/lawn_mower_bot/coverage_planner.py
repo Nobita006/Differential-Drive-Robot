@@ -31,7 +31,7 @@ class CoveragePlanner(Node):
         super().__init__('coverage_planner')
 
         # ---------- Parameters ----------
-        self.declare_parameter('lane_width', 0.3)
+        self.declare_parameter('lane_width', 0.5)
         self.declare_parameter('robot_radius', 0.25)
         self.declare_parameter('safety_margin', 0.5)
         self.declare_parameter('min_map_coverage', 0.01)  # min free cells before planning
@@ -199,19 +199,29 @@ class CoveragePlanner(Node):
             )
             free_mask[inflated] = False
 
-        # Mask exclusion zones
-        for gy in range(height):
-            for gx in range(width):
-                wx, wy = self._grid_to_world(gx, gy)
-                if self._is_in_exclusion_zone(wx, wy):
-                    free_mask[gy, gx] = False
+        # Mask exclusion zones (vectorized — no Python loops)
+        if self.exclusion_zones:
+            gy_coords, gx_coords = np.mgrid[0:height, 0:width]
+            wx_coords = gx_coords * self.map_info.resolution + self.map_info.origin.position.x + self.map_info.resolution / 2.0
+            wy_coords = gy_coords * self.map_info.resolution + self.map_info.origin.position.y + self.map_info.resolution / 2.0
+            for ez in self.exclusion_zones:
+                cx = ez.get('center_x', 0)
+                cy = ez.get('center_y', 0)
+                r = ez.get('radius', 0) + self.safety_margin
+                dist_sq = (wx_coords - cx)**2 + (wy_coords - cy)**2
+                free_mask[dist_sq < r*r] = False
 
         return free_mask
 
     def _perimeter_on_free_space(self, free_mask):
         """Generate waypoints tracing the outer contour of the free space."""
-        import cv2
         waypoints = []
+        try:
+            import cv2
+        except ImportError:
+            self.get_logger().warn("OpenCV not available — skipping perimeter pass")
+            return waypoints
+            
         mask_uint8 = (free_mask * 255).astype(np.uint8)
         
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -243,13 +253,13 @@ class CoveragePlanner(Node):
             
         return waypoints
 
-    def _boustrophedon_on_free_space(self, free_mask):
+    def _boustrophedon_on_free_space(self, free_mask, start_pos=None):
         """
         Generate boustrophedon (back-and-forth) waypoints covering all free space.
-
-        Works by scanning the free space in horizontal lanes, generating
-        waypoints at lane transitions and endpoints. This naturally adapts
-        to any lawn shape since it only generates waypoints within free cells.
+        
+        Uses clean alternating-direction rows: sweep left→right on row 1,
+        right→left on row 2, etc. This produces the straight-line patterns
+        that real mowers use.
         """
         height, width = free_mask.shape
         resolution = self.map_info.resolution
@@ -258,37 +268,35 @@ class CoveragePlanner(Node):
         waypoints = []
         direction = 1  # 1 = left-to-right, -1 = right-to-left
 
-        # Scan in horizontal lanes from bottom to top
         y = 0
         while y < height:
-            # Find the x-range of free cells in this lane
-            # Average over a few rows for stability
             y_end = min(y + lane_cells, height)
             lane_free = np.any(free_mask[y:y_end, :], axis=0)
-
-            # Find contiguous runs of free space in this lane
             runs = self._find_free_runs(lane_free)
-
+            
             if runs:
-                # Center Y of this lane
                 cy = (y + min(y + lane_cells - 1, height - 1)) / 2
                 _, wy = self._grid_to_world(0, int(cy))
-
-                for run_start, run_end in runs:
+                
+                # Process runs in the current sweep direction
+                ordered_runs = list(runs) if direction == 1 else list(reversed(runs))
+                    
+                for run_start, run_end in ordered_runs:
                     wx_start, _ = self._grid_to_world(run_start, int(cy))
                     wx_end, _ = self._grid_to_world(run_end, int(cy))
-
+                    
                     if direction == 1:
-                        yaw = 0.0  # facing east
-                        waypoints.append({"x": wx_start, "y": wy, "yaw": yaw})
-                        waypoints.append({"x": wx_end, "y": wy, "yaw": yaw})
+                        yaw = 0.0  # facing right
+                        waypoints.append({"x": float(wx_start), "y": float(wy), "yaw": yaw})
+                        waypoints.append({"x": float(wx_end), "y": float(wy), "yaw": yaw})
                     else:
-                        yaw = math.pi  # facing west
-                        waypoints.append({"x": wx_end, "y": wy, "yaw": yaw})
-                        waypoints.append({"x": wx_start, "y": wy, "yaw": yaw})
-
+                        yaw = math.pi  # facing left
+                        waypoints.append({"x": float(wx_end), "y": float(wy), "yaw": yaw})
+                        waypoints.append({"x": float(wx_start), "y": float(wy), "yaw": yaw})
+                        
+                # Flip direction after each row
                 direction *= -1
-
+                
             y += lane_cells
 
         return waypoints
@@ -320,15 +328,40 @@ class CoveragePlanner(Node):
         return runs
 
     def _remove_mowed_waypoints(self, waypoints):
-        """Remove waypoints in already-mowed areas."""
+        """Remove sweep PAIRS where both endpoints are already mowed.
+        
+        Waypoints come in pairs (sweep_start, sweep_end). Removing individual
+        points breaks the pairing and creates erratic diagonal jumps.
+        """
         if not self.mowed_cells:
             return waypoints
 
         filtered = []
-        for wp in waypoints:
-            gx, gy = self._world_to_grid(wp['x'], wp['y'])
-            if (gx, gy) not in self.mowed_cells:
-                filtered.append(wp)
+        i = 0
+        while i < len(waypoints):
+            if i + 1 < len(waypoints):
+                wp_start = waypoints[i]
+                wp_end = waypoints[i + 1]
+                gx1, gy1 = self._world_to_grid(wp_start['x'], wp_start['y'])
+                gx2, gy2 = self._world_to_grid(wp_end['x'], wp_end['y'])
+                start_mowed = (gx1, gy1) in self.mowed_cells
+                end_mowed = (gx2, gy2) in self.mowed_cells
+                
+                if start_mowed and end_mowed:
+                    # Both endpoints already mowed — skip entire sweep
+                    i += 2
+                    continue
+                    
+                # Keep the pair intact
+                filtered.append(wp_start)
+                filtered.append(wp_end)
+                i += 2
+            else:
+                # Odd waypoint at the end (shouldn't normally happen)
+                gx, gy = self._world_to_grid(waypoints[i]['x'], waypoints[i]['y'])
+                if (gx, gy) not in self.mowed_cells:
+                    filtered.append(waypoints[i])
+                i += 1
 
         return filtered
 
@@ -497,11 +530,16 @@ class CoveragePlanner(Node):
             # scipy not available — use simple approach without inflation
             self.get_logger().warn("scipy not available — skipping obstacle inflation")
             free_mask = (self.latest_map == 0)
-            for gy in range(height):
-                for gx in range(width):
-                    wx, wy = self._grid_to_world(gx, gy)
-                    if self._is_in_exclusion_zone(wx, wy):
-                        free_mask[gy, gx] = False
+            if self.exclusion_zones:
+                gy_coords, gx_coords = np.mgrid[0:height, 0:width]
+                wx_coords = gx_coords * self.map_info.resolution + self.map_info.origin.position.x + self.map_info.resolution / 2.0
+                wy_coords = gy_coords * self.map_info.resolution + self.map_info.origin.position.y + self.map_info.resolution / 2.0
+                for ez in self.exclusion_zones:
+                    cx = ez.get('center_x', 0)
+                    cy = ez.get('center_y', 0)
+                    r = ez.get('radius', 0) + self.safety_margin
+                    dist_sq = (wx_coords - cx)**2 + (wy_coords - cy)**2
+                    free_mask[dist_sq < r*r] = False
 
         # Step 2: Coverage Generation (Perimeter + Boustrophedon)
         waypoints = self._perimeter_on_free_space(free_mask)
@@ -514,7 +552,8 @@ class CoveragePlanner(Node):
         except ImportError:
             inner_mask = free_mask
             
-        waypoints.extend(self._boustrophedon_on_free_space(inner_mask))
+        start_pos = waypoints[-1] if waypoints else None
+        waypoints.extend(self._boustrophedon_on_free_space(inner_mask, start_pos))
 
         # Step 3: Remove already-mowed areas
         waypoints = self._remove_mowed_waypoints(waypoints)
@@ -581,15 +620,18 @@ class CoveragePlanner(Node):
             return
 
         height, width = self.latest_map.shape
-        grid = np.full((height, width), -1, dtype=np.int8) # Default unknown
+        grid = np.full((height, width), -1, dtype=np.int8)
 
         # Mark free space as 0 (unmowed)
         grid[self.latest_map == 0] = 0
 
-        # Mark mowed cells as 100 (mowed)
-        for gx, gy in self.mowed_cells:
-            if 0 <= gx < width and 0 <= gy < height:
-                grid[gy, gx] = 100
+        # Mark mowed cells as 100 (vectorized)
+        if self.mowed_cells:
+            cells = np.array(list(self.mowed_cells))
+            gx_arr = cells[:, 0]
+            gy_arr = cells[:, 1]
+            valid = (gx_arr >= 0) & (gx_arr < width) & (gy_arr >= 0) & (gy_arr < height)
+            grid[gy_arr[valid], gx_arr[valid]] = 100
 
         area_msg = OccupancyGrid()
         area_msg.header.frame_id = 'map'
