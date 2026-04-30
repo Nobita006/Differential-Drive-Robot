@@ -74,8 +74,8 @@ If an object (like a dog or a person) walks in front of the mower *after* the in
 - If the dog blocks the entire path and the robot cannot drive around it, the robot will brake to a stop and wait for the dynamic object to move out of the way before resuming its path.
 
 **What happens if the dog was sleeping during Phase 1 (SLAM Mapping) but wakes up and leaves during Phase 3?**
-Because the Coverage Planner relies on a *static snapshot* of the SLAM map generated in Phase 1, the planner believes the dog is a permanent structure (like a rock). It will generate a path that intentionally loops around where the dog was sleeping.
-When the robot drives by during Phase 3, the sensors will see that the dog is gone, but the robot will **not** automatically go back to mow that empty patch of grass because it has no waypoints directing it to go there. *See "Limitations & Future Improvements" for the solution to this.*
+Because the Coverage Planner relies on a *static snapshot* of the SLAM map generated in Phase 1, the initial plan will intentionally loop around where the dog was sleeping. However, our custom **Executor Replanning Loop** solves this! 
+After completing the initial batch of sweeps, the robot automatically compares its real-time `mowed_area` footprint against the live free-space map. If it detects a patch of grass that was skipped (because the dog moved), it triggers a **Full Re-Plan**, generates a new path directly to that missed patch, and goes back to cut it before finally returning to the dock.
 
 ---
 

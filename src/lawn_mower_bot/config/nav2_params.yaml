@@ -10,7 +10,7 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: True
-    controller_frequency: 20.0
+    controller_frequency: 10.0
     # RPP handles velocity limits internally, but we set safe defaults here
     min_x_velocity: 0.0
     min_y_velocity: 0.0
@@ -46,10 +46,10 @@ controller_server:
       
       # LOOKAHEAD (The "Carrot")
       # It will look ahead. If the path turns, it steers towards that point.
-      lookahead_dist: 0.8
-      min_lookahead_dist: 0.4
-      max_lookahead_dist: 1.5
-      lookahead_time: 1.2
+      lookahead_dist: 0.45
+      min_lookahead_dist: 0.2
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.0
       
       # ROTATION LOGIC 
       # Higher threshold: smoothly arc unless deviation is >45 deg.

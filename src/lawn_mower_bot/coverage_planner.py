@@ -256,18 +256,15 @@ class CoveragePlanner(Node):
     def _boustrophedon_on_free_space(self, free_mask, start_pos=None):
         """
         Generate boustrophedon (back-and-forth) waypoints covering all free space.
-        
-        Uses clean alternating-direction rows: sweep left→right on row 1,
-        right→left on row 2, etc. This produces the straight-line patterns
-        that real mowers use.
+        Optimized with Greedy Nearest-Neighbor linking to prevent jumping across obstacles
+        (handles implicit cell decomposition).
         """
         height, width = free_mask.shape
         resolution = self.map_info.resolution
         lane_cells = max(1, int(self.lane_width / resolution))
 
-        waypoints = []
-        direction = 1  # 1 = left-to-right, -1 = right-to-left
-
+        # 1. Generate all sweep segments
+        segments = []
         y = 0
         while y < height:
             y_end = min(y + lane_cells, height)
@@ -278,26 +275,63 @@ class CoveragePlanner(Node):
                 cy = (y + min(y + lane_cells - 1, height - 1)) / 2
                 _, wy = self._grid_to_world(0, int(cy))
                 
-                # Process runs in the current sweep direction
-                ordered_runs = list(runs) if direction == 1 else list(reversed(runs))
-                    
-                for run_start, run_end in ordered_runs:
+                for run_start, run_end in runs:
                     wx_start, _ = self._grid_to_world(run_start, int(cy))
                     wx_end, _ = self._grid_to_world(run_end, int(cy))
-                    
-                    if direction == 1:
-                        yaw = 0.0  # facing right
-                        waypoints.append({"x": float(wx_start), "y": float(wy), "yaw": yaw})
-                        waypoints.append({"x": float(wx_end), "y": float(wy), "yaw": yaw})
-                    else:
-                        yaw = math.pi  # facing left
-                        waypoints.append({"x": float(wx_end), "y": float(wy), "yaw": yaw})
-                        waypoints.append({"x": float(wx_start), "y": float(wy), "yaw": yaw})
-                        
-                # Flip direction after each row
-                direction *= -1
-                
+                    segments.append({
+                        "pt1": {"x": float(wx_start), "y": float(wy)},
+                        "pt2": {"x": float(wx_end), "y": float(wy)}
+                    })
             y += lane_cells
+
+        if not segments:
+            return []
+
+        # 2. Greedy Nearest-Neighbor Linking
+        waypoints = []
+        if start_pos is not None:
+            current_pos = start_pos
+        else:
+            current_pos = segments[0]["pt1"] 
+            
+        unvisited = segments.copy()
+
+        while unvisited:
+            best_idx = -1
+            best_dist = float('inf')
+            enter_pt1 = True
+            
+            # Find the segment endpoint closest to current_pos
+            for i, seg in enumerate(unvisited):
+                dist1 = math.hypot(current_pos['x'] - seg['pt1']['x'], current_pos['y'] - seg['pt1']['y'])
+                dist2 = math.hypot(current_pos['x'] - seg['pt2']['x'], current_pos['y'] - seg['pt2']['y'])
+                
+                if dist1 < best_dist:
+                    best_dist = dist1
+                    best_idx = i
+                    enter_pt1 = True
+                if dist2 < best_dist:
+                    best_dist = dist2
+                    best_idx = i
+                    enter_pt1 = False
+                    
+            # Extract the best segment
+            seg = unvisited.pop(best_idx)
+            
+            if enter_pt1:
+                start = seg["pt1"]
+                end = seg["pt2"]
+            else:
+                start = seg["pt2"]
+                end = seg["pt1"]
+                
+            yaw = math.atan2(end["y"] - start["y"], end["x"] - start["x"])
+            
+            # Record the sweep
+            waypoints.append({"x": start["x"], "y": start["y"], "yaw": float(yaw)})
+            waypoints.append({"x": end["x"], "y": end["y"], "yaw": float(yaw)})
+            
+            current_pos = end
 
         return waypoints
 
