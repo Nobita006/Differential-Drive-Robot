@@ -1,3 +1,9 @@
+![alt text]({D91B0BD5-5B22-4B18-AB21-98556A73A21A}.png)
+
+# Video Demo
+
+Youtube link - https://youtu.be/XuA1p0WpDlc
+
 # 🤖 Autonomous ROS 2 Lawnmower Bot
 
 A fully autonomous, differential-drive lawnmower simulation built on **ROS 2 Jazzy** and **Gazebo**. This project demonstrates a complete robotic pipeline including state-machine execution, SLAM mapping, Boustrophedon coverage planning, computer vision obstacle detection, and Nav2 autonomous navigation.
