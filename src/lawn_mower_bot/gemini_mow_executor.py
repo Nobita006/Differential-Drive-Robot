@@ -64,6 +64,7 @@ def make_pose(x, y, yaw, nav, frame='map'):
 # Mowing states
 STATE_IDLE = "idle"
 STATE_BOUNDARY_DISCOVERY = "boundary_discovery"
+STATE_NAV_TO_START = "nav_to_start"
 STATE_WAITING_FOR_PLAN = "waiting_for_plan"
 STATE_MOWING = "mowing"
 STATE_REPLANNING = "replanning"
@@ -99,6 +100,8 @@ class GeminiMowExecutor(Node):
         # ---------- State ----------
         self.state = STATE_IDLE
         self.coverage_waypoints = []
+        self.perimeter_waypoints = []
+        self.sweep_waypoints = []
         self.hazard_data = None
         self.coverage_status = None
         self.missed_waypoints = []
@@ -426,6 +429,15 @@ class GeminiMowExecutor(Node):
                 return
 
             # --- PHASE 2/3: COVERAGE MOWING WAYPOINTS ---
+            # GUARD: Do NOT process coverage waypoints if we're still discovering boundaries.
+            # The GeminiMowPlanner also subscribes to /mow_command and immediately fires
+            # a fallback plan which triggers coverage generation before discovery finishes.
+            if self.state == STATE_BOUNDARY_DISCOVERY:
+                self.get_logger().info(
+                    "⏳ Ignoring coverage waypoints — still in boundary discovery phase"
+                )
+                return
+
             if data.get('complete', False):
                 self.get_logger().info("✅ Coverage planner says: ALL COVERED!")
                 self._run_return_to_dock()
@@ -437,10 +449,18 @@ class GeminiMowExecutor(Node):
                 self._run_return_to_dock()
                 return
 
+            perimeter_count = data.get('perimeter_count', 0)
+            self.get_logger().info(f"DEBUG: Parsed perimeter_count = {perimeter_count} from JSON")
+            
+            # Split into perimeter and sweep waypoints
+            self.perimeter_waypoints = waypoints[:perimeter_count] if perimeter_count > 0 else []
+            self.sweep_waypoints = waypoints[perimeter_count:]
             self.coverage_waypoints = waypoints
             self.total_waypoints = self.total_completed + len(waypoints)
+            
             self.get_logger().info(
-                f"📋 Received {len(waypoints)} coverage waypoints"
+                f"📋 Received {len(waypoints)} waypoints "
+                f"({len(self.perimeter_waypoints)} perimeter + {len(self.sweep_waypoints)} sweep)"
             )
 
             # Visualize planned path
@@ -495,7 +515,7 @@ class GeminiMowExecutor(Node):
     # Phase 2: Coverage Mowing
     # ================================================================== #
     def _run_coverage_mowing(self):
-        """Execute coverage waypoints with stuck detection and deviation tracking."""
+        """Execute coverage waypoints: perimeter first, then boustrophedon sweeps."""
         self.state = STATE_MOWING
         waypoints = self.coverage_waypoints
 
@@ -504,14 +524,103 @@ class GeminiMowExecutor(Node):
             self._run_return_to_dock()
             return
 
-        poses = [make_pose(wp['x'], wp['y'], wp['yaw'], self.nav) for wp in waypoints]
+        self.last_position = self._get_robot_position()
+        self.last_move_time = self.get_clock().now().nanoseconds / 1e9
+
+        # ── Phase 2a: PERIMETER PASS ──
+        perimeter_wps = getattr(self, 'perimeter_waypoints', [])
+        if perimeter_wps:
+            print("=" * 60)
+            print("  PHASE 2a: PERIMETER PASS")
+            print(f"  Tracing {len(perimeter_wps)} edge waypoints continuously...")
+            print("=" * 60)
+
+            perimeter_poses = [make_pose(wp['x'], wp['y'], wp['yaw'], self.nav) for wp in perimeter_wps]
+            self._publish_progress("perimeter")
+
+            # Go to the first point with blades OFF
+            self.get_logger().info("Navigating to start of perimeter with blades OFF...")
+            self._set_blade_state(False)
+            # Reset stuck detection state before starting
+            self.recovery_count = 0
+            self.last_position = self._get_robot_position()
+            self.last_move_time = self.get_clock().now().nanoseconds / 1e9
+            self.nav.goToPose(perimeter_poses[0])
+            
+            nav_stuck_check = 0
+            while not self.nav.isTaskComplete():
+                time.sleep(0.5)
+                nav_stuck_check += 1
+                if nav_stuck_check % 20 == 0:  # Check every 10s
+                    if self._check_stuck_and_recover():
+                        self.get_logger().warn("Recovered while going to start of perimeter! Proceeding to trace anyway.")
+                        break
+                        
+                if self.state == STATE_STOPPED:
+                    self.nav.cancelTask()
+                    return
+
+            # Turn blades ON and trace the perimeter point-by-point
+            self.get_logger().info("Perimeter reached. Turning blades ON and tracing point-by-point...")
+            self._set_blade_state(True)
+            self.state = STATE_MOWING
+            
+            for i in range(1, len(perimeter_poses)):
+                pose = perimeter_poses[i]
+                # Reset stuck detection state for each new waypoint
+                self.recovery_count = 0
+                self.last_position = self._get_robot_position()
+                self.last_move_time = self.get_clock().now().nanoseconds / 1e9
+                
+                self.nav.goToPose(pose)
+                
+                nav_stuck_check = 0
+                recovered = False
+                while not self.nav.isTaskComplete():
+                    time.sleep(0.5)
+                    nav_stuck_check += 1
+                    if nav_stuck_check % 20 == 0:  # Check every 10s
+                        if self._check_stuck_and_recover():
+                            self.get_logger().warn(f"Recovered at perimeter point {i+1}. Skipping to next point.")
+                            recovered = True
+                            break
+                            
+                    if self.state == STATE_STOPPED:
+                        self.nav.cancelTask()
+                        return
+                
+                # After recovery, task is already cancelled. Don't call getResult.
+                if recovered:
+                    continue
+                        
+                result = self.nav.getResult()
+                if result == TaskResult.SUCCEEDED:
+                    self.total_completed += 1
+                else:
+                    self.get_logger().warn(f"Failed to reach perimeter point {i+1}. Skipping.")
+                    
+            self.get_logger().info("✅ Perimeter COMPLETE")
+                
+        # ── Phase 2b: BOUSTROPHEDON SWEEPS ──
+        self._set_blade_state(True)
+        sweep_wps = self.sweep_waypoints  # Always use only the sweep portion
+        if not sweep_wps:
+            self.get_logger().info("No sweep waypoints — going to dock")
+            self._run_return_to_dock()
+            return
+
+        print("=" * 60)
+        print("  PHASE 2b: BOUSTROPHEDON SWEEPS")
+        print(f"  Mowing {len(sweep_wps)} sweep waypoints...")
+        print("=" * 60)
+
+        poses = [make_pose(wp['x'], wp['y'], wp['yaw'], self.nav) for wp in sweep_wps]
         self.total_waypoints = self.total_completed + len(poses)
 
         self.get_logger().info(
-            f"🚜 Mowing {len(poses)} waypoints in batches of {self.batch_size}"
+            f"🚜 Sweeping {len(poses)} waypoints in batches of {self.batch_size}"
         )
         self._publish_progress("mowing")
-        self._set_blade_state(True)
 
         batch_failed_wps = []
         self.last_position = self._get_robot_position()
@@ -524,16 +633,16 @@ class GeminiMowExecutor(Node):
             self.recovery_count = 0  # Reset per-batch recovery counter
             batch_end = min(batch_start + self.batch_size, len(poses))
             batch = poses[batch_start:batch_end]
-            batch_wp_dicts = waypoints[batch_start:batch_end]
+            batch_wp_dicts = sweep_wps[batch_start:batch_end]
             batch_num = (batch_start // self.batch_size) + 1
             total_batches = (len(poses) + self.batch_size - 1) // self.batch_size
 
             self.get_logger().info(
-                f"📦 Batch {batch_num}/{total_batches} ({len(batch)} waypoints)"
+                f"📦 Sweep Batch {batch_num}/{total_batches} ({len(batch)} waypoints)"
             )
             self._publish_progress("mowing")
 
-            # Execute batch
+            # Execute batch using followWaypoints for reliable straight lines
             self.nav.followWaypoints(batch)
 
             i = 0
@@ -542,16 +651,17 @@ class GeminiMowExecutor(Node):
                 i += 1
                 time.sleep(0.2)
                 feedback = self.nav.getFeedback()
-                if feedback and i % 15 == 0:
-                    current_wp = feedback.current_waypoint
-                    last_wp_reached = current_wp
-                    self._publish_progress("mowing")
+                if feedback and hasattr(feedback, 'current_waypoint'):
+                    if feedback.current_waypoint > last_wp_reached:
+                        last_wp_reached = feedback.current_waypoint
 
+                if i % 15 == 0:
+                    self._publish_progress("mowing")
                     # Mark waypoints as mowed
-                    for j in range(current_wp):
+                    for j in range(last_wp_reached):
                         idx = batch_start + j
-                        if idx < len(waypoints):
-                            self._mark_as_mowed(waypoints[idx]['x'], waypoints[idx]['y'])
+                        if idx < len(sweep_wps):
+                            self._mark_as_mowed(sweep_wps[idx]['x'], sweep_wps[idx]['y'])
 
                 # Stuck detection every 50 iterations (10s)
                 if i % 50 == 0:
@@ -572,23 +682,24 @@ class GeminiMowExecutor(Node):
                 for wp in batch_wp_dicts:
                     self._mark_as_mowed(wp['x'], wp['y'])
 
-            elif result == TaskResult.FAILED:
-                self.get_logger().warn(f"⚠️ Batch {batch_num} FAILED")
-                for j in range(last_wp_reached, len(batch_wp_dicts)):
-                    idx = batch_start + j
-                    if idx < len(waypoints):
-                        batch_failed_wps.append(waypoints[idx])
-                for j in range(last_wp_reached):
-                    idx = batch_start + j
-                    if idx < len(waypoints):
-                        self._mark_as_mowed(waypoints[idx]['x'], waypoints[idx]['y'])
-                self.total_completed += last_wp_reached
-                time.sleep(1.0)
-
             elif result == TaskResult.CANCELED:
                 self.get_logger().info(f"Batch {batch_num} canceled")
                 self.state = STATE_STOPPED
                 return
+
+            else:
+                self.get_logger().warn(f"⚠️ Batch {batch_num} followWaypoints FAILED or partially failed")
+                # Mark as failed what we didn't reach
+                for j in range(last_wp_reached, len(batch_wp_dicts)):
+                    idx = batch_start + j
+                    if idx < len(sweep_wps):
+                        batch_failed_wps.append(sweep_wps[idx])
+                for j in range(last_wp_reached):
+                    idx = batch_start + j
+                    if idx < len(sweep_wps):
+                        self._mark_as_mowed(sweep_wps[idx]['x'], sweep_wps[idx]['y'])
+                self.total_completed += last_wp_reached
+                time.sleep(1.0)
 
         # After all batches: replan to check for missed areas
         self.replan_count += 1
@@ -787,6 +898,8 @@ class GeminiMowExecutor(Node):
             m.id = i + 1
             m.type = Marker.SPHERE
             m.action = Marker.ADD
+            m.lifetime.sec = 0  # Never expire
+            m.lifetime.nanosec = 0
             m.pose.position.x = float(wp['x'])
             m.pose.position.y = float(wp['y'])
             m.pose.position.z = 0.05
@@ -799,6 +912,30 @@ class GeminiMowExecutor(Node):
             m.color.b = 0.0
             m.color.a = 0.6
             marker_array.markers.append(m)
+
+        # Also publish a LINE_STRIP connecting all waypoints for easy route visualization
+        line = Marker()
+        line.header.frame_id = 'map'
+        line.header.stamp = self.get_clock().now().to_msg()
+        line.ns = 'planned_path_line'
+        line.id = 0
+        line.type = Marker.LINE_STRIP
+        line.action = Marker.ADD
+        line.lifetime.sec = 0  # Never expire
+        line.lifetime.nanosec = 0
+        line.scale.x = 0.03  # Line width
+        line.color.r = 0.0
+        line.color.g = 1.0
+        line.color.b = 0.5
+        line.color.a = 0.8
+        line.pose.orientation.w = 1.0
+        for wp in waypoints:
+            p = Point()
+            p.x = float(wp['x'])
+            p.y = float(wp['y'])
+            p.z = 0.05
+            line.points.append(p)
+        marker_array.markers.append(line)
 
         self.waypoint_pub.publish(marker_array)
         self.get_logger().info(f"Published {len(waypoints)} waypoint markers to RViz")
@@ -846,6 +983,7 @@ class GeminiMowExecutor(Node):
 
         state_labels = {
             STATE_BOUNDARY_DISCOVERY: "🔍 EXPLORING",
+            STATE_NAV_TO_START: "🚀 NAV TO START",
             STATE_WAITING_FOR_PLAN: "⏳ PLANNING",
             STATE_MOWING: "🚜 MOWING",
             STATE_REPLANNING: "🔄 REPLANNING",

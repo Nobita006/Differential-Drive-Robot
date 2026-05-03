@@ -39,8 +39,10 @@ def main():
     free_mask[300:350, 300:350] = False
     
     print("Generating coverage waypoints...")
-    waypoints = planner._boustrophedon_on_free_space(free_mask)
-    print(f"Generated {len(waypoints)} waypoints.")
+    perimeter_wps = planner._perimeter_on_free_space(free_mask)
+    sweep_wps = planner._boustrophedon_on_free_space(free_mask, perimeter_wps[-1] if perimeter_wps else None)
+    waypoints = perimeter_wps + sweep_wps
+    print(f"Generated {len(waypoints)} waypoints ({len(perimeter_wps)} perimeter + {len(sweep_wps)} sweep).")
     
     # Extract X and Y for plotting
     x_coords = [wp['x'] for wp in waypoints]
